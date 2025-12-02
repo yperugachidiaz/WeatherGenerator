@@ -28,6 +28,7 @@ from weathergen.model.engines import (
     EnsPredictionHead,
     ForecastingEngine,
     GlobalAssimilationEngine,
+    LatentState,
     Local2GlobalAssimilationEngine,
     LocalAssimilationEngine,
     QueryAggregationEngine,
@@ -458,6 +459,10 @@ class Model(torch.nn.Module):
                     stream_name=stream_name,
                 )
             )
+        
+        self.norm = nn.LayerNorm(cf.ae_local_dim_embed)
+        self.class_token_idx = 1    # cf.latent_state_class_token
+        self.register_token_idx = 3 # cf.latent_state_register_token
 
         return self
 
@@ -665,6 +670,19 @@ class Model(torch.nn.Module):
                 target_coords_idxs,
             )
         ]
+
+        latents = {}
+        z_pre_norm = tokens
+        z = self.norm(z_pre_norm)
+
+        latent_state = LatentState(
+            class_token=z[:, : self.class_token_idx],
+            register_tokens=z[:, self.class_token_idx : self.register_token_idx],
+            patch_tokens=z[:, self.register_token_idx :],
+            z_pre_norm=z_pre_norm,
+        )
+        
+        latents["latent_state_pre_heads"] = latent_state
 
         return preds_all, posteriors
 
