@@ -7,9 +7,9 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-ERA5_w :
+ERA5_q :
   type : anemoi
-  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2022-6h-v6.zarr']
+  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
   stream_id : 0
   source : ['q_']
   target : ['q_']

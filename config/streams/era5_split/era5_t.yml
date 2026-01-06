@@ -9,7 +9,7 @@
 
 ERA5_t :
   type : anemoi
-  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2022-6h-v6.zarr']
+  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
   stream_id : 0
   source : ['2t', 't_']
   target : ['2t', 't_']
