@@ -1,0 +1,37 @@
+# ERA5 decoder stream for t_850 and z_500 only (issue #2636: separate physical decoder
+# for z/t). Split from seb_jepa_forecast_multi_data_all_years/era5.yml; identical except
+# for the target list and loss_weight. Input side is unchanged (ERA5_in in analysis.yml).
+# loss_weight = n_streams * n_ch / n_ch_total = 2 * 2/68 so the per-channel gradient
+# weight matches the single-decoder baseline (LossPhysical: mean over channels per
+# stream, then sum of loss_weight * stream_mean / n_streams).
+
+ERA5_Z500T850:
+  type: anemoi
+  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2024-1h-v3-with-era51.zarr'] #['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
+  # filenames: # ['aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr']
+  stream_id: 0
+  source: []  # decoder-only stream (diagnostic); ERA5 input comes from ERA5_in in analysis.yml
+  target: ['t_850', 'z_500']
+  geoinfo_channels: ['z', 'lsm', 'slor', 'sdor', 'insolation', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'noise_time']
+  loss_weight: 0.0059  # 0.1x neutral (neutral = 2*2/68 = 0.0588): deliberate DOWN-weighting of z/t
+  diagnostic: True
+  location_weight: cosine_latitude
+  token_size: 8
+  tokenize_spacetime: False
+  max_num_targets: -1
+  # frequency: 06:00:00
+  embed :
+    net : transformer
+    num_tokens : 1
+    num_heads : 8
+    dim_embed : 512
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 512
+  target_readout :
+    num_layers : 2
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1
