@@ -39,6 +39,7 @@ from weathergen.model.engines import (
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
 )
+from weathergen.model.latent_dump import KIND_DIFFUSION, KIND_FORECAST, LatentDumper
 from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
@@ -378,6 +379,9 @@ class Model(torch.nn.Module):
 
         self.cf = cf
         self.dtype = get_dtype(self.cf.attention_dtype)
+        # save latent tokens when save_latents=True (only in eval mode)
+        # by default results/<run_id>/latents
+        self.latent_dumper = LatentDumper(cf)
         self.sources_size = sources_size
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
@@ -843,6 +847,10 @@ class Model(torch.nn.Module):
             samples_or_output, model_params
         )
 
+        # save encoder output to file (encoder runs only on first chunk)
+        if from_encoder and self.latent_dumper.enabled and not self.training:
+            self.latent_dumper.dump_encoder(tokens, source_samples)
+
         # output_idxs start with output_offset
         global_steps = source_samples.get_output_idxs()
         forecast_offset = global_steps[0]
@@ -1005,6 +1013,11 @@ class Model(torch.nn.Module):
                     predict_residual = self.cf.get("fe_diffusion_predict_residual", False)
                     # Apply residual correction; broadcasts cond (1, H, D) over all N members.
                     member_final_tokens = cond + tokens if predict_residual else tokens
+                    # for all members, save final denoised state to file
+                    if self.latent_dumper.enabled and not self.training:
+                        self.latent_dumper.dump_forecast(
+                            KIND_DIFFUSION, member_final_tokens, source_samples, step
+                        )
                     # Decode the members in groups of decode_members_per_pass. The decoder runs
                     # over (members * n_target_points) query tokens, so decoding all members at
                     # once makes its peak activation scale with the ensemble size — the dominant
@@ -1060,6 +1073,16 @@ class Model(torch.nn.Module):
                     )
                     tokens = None
                     continue
+
+            # save forecast engine output to file
+            if self.latent_dumper.enabled and not self.training:
+                is_diffusion = self.cf.get("fe_diffusion_model", False)
+                self.latent_dumper.dump_forecast(
+                    KIND_DIFFUSION if is_diffusion else KIND_FORECAST,
+                    tokens,
+                    source_samples,
+                    step,
+                )
 
             if "masking" in self.cf.training_config.training_mode:
                 # decoder predictions
