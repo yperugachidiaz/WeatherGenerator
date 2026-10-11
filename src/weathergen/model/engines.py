@@ -428,6 +428,7 @@ class QueryAggregationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         with_2d_rope=self.cf.get("rope_2D", False),
+                        with_bias=self.cf.get("ae_attention_bias", False),
                     )
                 )
             else:
@@ -516,6 +517,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         with_2d_rope=self.cf.get("rope_2D", False),
+                        with_bias=self.cf.get("ae_attention_bias", False),
                     )
                 )
             else:
