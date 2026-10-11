@@ -70,6 +70,24 @@ class LossLatentSSLStudentTeacher(LossModuleBase):
             self.context_loss_weight = 0.0
             self.context_loss_warmup_steps = 0
 
+        # Latent regularization of the student encoder latent to prevent outlier channels
+        # "channel_share" punishes channels above max_share, "kurtosis" punishes heavy tails
+        latent_reg_cfg = mode_cfg.get("latent_regularization", None)
+        self.latent_reg_type = "channel_share"
+        self.latent_reg_weight = 0.0
+        self.latent_reg_max_share = 1.0
+        if latent_reg_cfg and latent_reg_cfg.get("enabled", False):
+            self.latent_reg_type = latent_reg_cfg.get("type", "channel_share")
+            assert self.latent_reg_type in ("channel_share", "kurtosis"), (
+                f"Invalid latent_regularization type {self.latent_reg_type!r}"
+            )
+            default_weight = 100.0 if self.latent_reg_type == "channel_share" else 0.01
+            self.latent_reg_weight = latent_reg_cfg.get("weight", default_weight)
+            self.latent_reg_max_share = latent_reg_cfg.get("max_share", 0.01)
+        self.num_aux_tokens = int(cf.get("num_register_tokens", 0) or 0) + int(
+            cf.get("num_class_tokens", 0) or 0
+        )
+
     def compute_loss(self, preds, targets, metadata, istep=0, **kwargs) -> LossValues:
         # gradient loss
         loss = torch.tensor(0.0, device=self.device, requires_grad=True)
@@ -145,6 +163,28 @@ class LossLatentSSLStudentTeacher(LossModuleBase):
                     )
                     loss = loss + level_w * ctx_weight * ctx_loss_value
                     losses_all[f"context{suffix}"] = ctx_loss_value.item()
+
+        # Latent regularization only when training_config.latent_regularization is enabled
+        latent_state = preds_latent.get("latent_state") if isinstance(preds_latent, dict) else None
+        if (
+            self.latent_reg_weight > 0.0
+            and latent_state is not None
+            and latent_state.z_pre_norm is not None
+        ):
+            if self.latent_reg_type == "kurtosis":
+                reg, excess_kurtosis = kurtosis_penalty(
+                    latent_state.z_pre_norm, self.num_aux_tokens
+                )
+                losses_all["latent_excess_kurtosis"] = excess_kurtosis
+            else:
+                reg, max_share = channel_share_penalty(
+                    latent_state.z_pre_norm,
+                    self.num_aux_tokens,
+                    self.latent_reg_max_share,
+                )
+                losses_all["latent_max_share"] = max_share
+            loss = loss + self.latent_reg_weight * reg
+            losses_all["latent_reg"] = reg.item()
 
         return LossValues(loss=loss, losses_all=losses_all, stddev_all={})
 
@@ -351,6 +391,52 @@ def jepa_loss(
         mask,
         empty_warning="jepa_loss mask is all zeros, likely incorrect masking config.",
     )
+
+
+def channel_share_penalty(
+    z: torch.Tensor, num_aux_tokens: int, max_share: float
+) -> tuple[torch.Tensor, float]:
+    """
+    Penalty for outlier channels in the latent.
+
+    Per sample: share_c = mean_t(z_tc^2) / sum_c mean_t(z_tc^2), the channel's share of each
+    token. Channels above max_share are punished: sum_c relu(share_c - max_share)^2.
+
+    Args:
+        z: encoder output [..., tokens, channels], aux tokens first.
+        num_aux_tokens: number of aux tokens to drop.
+        max_share: largest share of a channel without penalty.
+
+    Returns:
+        Penalty (with gradient) and largest share (float, for logging).
+    """
+    z = z.reshape(-1, z.shape[-2], z.shape[-1])[:, num_aux_tokens:].float()
+    energy = z.pow(2).mean(dim=1)  # [samples, channels]
+    share = energy / energy.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    penalty = F.relu(share - max_share).pow(2).sum(dim=-1).mean()
+    return penalty, share.max().item()
+
+
+def kurtosis_penalty(z: torch.Tensor, num_aux_tokens: int) -> tuple[torch.Tensor, float]:
+    """
+    Penalty for heavy tails of latent i.e. excess kurtosis above that of a normal distribution.
+
+    Per sample, over all cell tokens and channels: excess = mean(z_c^4) / mean(z_c^2)^2 - 3,
+    with z_c = z - mean(z). Penalty = relu(excess): zero for normal or lighter tails.
+
+    Args:
+        z: encoder output [..., tokens, channels], aux tokens first.
+        num_aux_tokens: number of aux tokens to drop.
+
+    Returns:
+        Penalty (with gradient) and mean excess kurtosis (float, for logging).
+    """
+    z = z.reshape(-1, z.shape[-2], z.shape[-1])[:, num_aux_tokens:].float()
+    zc = z - z.mean(dim=(1, 2), keepdim=True)
+    m2 = zc.pow(2).mean(dim=(1, 2))
+    m4 = zc.pow(4).mean(dim=(1, 2))
+    excess = m4 / m2.pow(2).clamp_min(1e-12) - 3.0
+    return F.relu(excess).mean(), excess.mean().item()
 
 
 def context_loss(student_patches, student_masks, teacher_patches, teacher_masks):
