@@ -88,6 +88,8 @@ class CollapseMonitor:
         self.dimension_variance_config = metrics_config.get("dimension_variance", {})
         self.prototype_entropy_config = metrics_config.get("prototype_entropy", {})
         self.ema_beta_config = metrics_config.get("ema_beta", {})
+        # Check for dominant channel in latent
+        self.channel_share_config = metrics_config.get("channel_share", {})
 
         # Validate tensor_source values
         self._validate_tensor_source(self.effective_rank_config, "effective_rank")
@@ -438,6 +440,35 @@ class CollapseMonitor:
         indices = torch.randperm(z.shape[0], device=z.device)[:sample_size]
         return z[indices]
 
+    def _compute_channel_share(self, z: torch.Tensor, sample_size: int = 16384) -> dict[str, float]:
+        """
+        Check whether a single channel dominates the latent.
+
+        Channel share per token: z_c^2 / sum_c z_c^2, averaged over tokens. Returns the largest
+        share and its channel, the largest |channel mean|, the std of the channel means, and the
+        excess kurtosis (0 for a normal distribution).
+
+        Args:
+            z: Latent tensor [..., D], register tokens removed.
+            sample_size: Maximum number of tokens used.
+        """
+        z = z.detach().reshape(-1, z.shape[-1]).float()
+        if z.shape[0] > sample_size:
+            idx = torch.randperm(z.shape[0], device=z.device)[:sample_size]
+            z = z[idx]
+        sq = z.pow(2)
+        share = (sq / sq.sum(dim=-1, keepdim=True).clamp_min(1e-12)).mean(dim=0)
+        i_max = int(torch.argmax(share))
+        channel_mean = z.mean(dim=0)
+        zs = (z - z.mean()) / z.std().clamp_min(1e-12)
+        return {
+            "max_channel_share": float(share[i_max]),
+            "max_channel_index": float(i_max),
+            "max_abs_channel_mean": float(channel_mean.abs().max()),
+            "channel_mean_std": float(channel_mean.std()),
+            "excess_kurtosis": float(zs.pow(4).mean() - 3.0),
+        }
+
     def _compute_effective_rank(self, z: torch.Tensor, sample_size: int = 2048) -> float:
         """
         Compute effective rank via entropy of normalized singular values (RankMe).
@@ -750,3 +781,23 @@ class CollapseMonitor:
                 f"Collapse monitor - skipping compute_metrics: "
                 f"student_latent is {'None' if student_latent is None else type(student_latent)}"
             )
+
+        # Check for dominant channel in student encoder latent and teacher target (no aux tokens)
+        if self.enabled and self.channel_share_config.get("enabled", True):
+            sample_size = self.channel_share_config.get("sample_size", 16384)
+            num_aux = int(cf.get("num_register_tokens", 0) or 0) + int(
+                cf.get("num_class_tokens", 0) or 0
+            )
+            encoder_out = None
+            if preds.latent and "latent_state" in preds.latent[0]:
+                state = preds.latent[0]["latent_state"]
+                if isinstance(state, LatentState) and state.z_pre_norm is not None:
+                    encoder_out = state.z_pre_norm[:, num_aux:]
+            monitored = (("student_encoder", encoder_out), ("teacher_target", teacher_latent))
+            for name, tensor in monitored:
+                if isinstance(tensor, list):
+                    tensor = tensor[0] if tensor else None
+                if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+                    continue
+                for key, value in self._compute_channel_share(tensor, sample_size).items():
+                    self._metrics_cache[f"collapse.{name}.{key}"].append(value)
