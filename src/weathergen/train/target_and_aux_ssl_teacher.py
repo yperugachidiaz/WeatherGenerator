@@ -229,9 +229,9 @@ def get_target_postprocessing(
                 num_deep_ssl_levels=num_deep_ssl_levels,
             )
         elif loss_name == "JEPA":
-            return_dict[loss_name] = JEPATargetProcessing()
+            return_dict[loss_name] = JEPATargetProcessing(target_norm=conf.get("target_norm", None))
         else:
-            # We skip losses that are not handled by the teacher
+            # Skip losses that are not handled by the teacher
             logger.debug(f"Skipping unknown loss type {loss_name!r} in target postprocessing")
             continue
     return return_dict

@@ -364,8 +364,32 @@ class DINOTargetProcessing(nn.Module):
 
 
 class JEPATargetProcessing(nn.Module):
-    def __init__(self):
+    """
+    Optional normalization of the JEPA teacher targets.
+
+    target_norm:
+        None / "none": targets unchanged (default).
+        "channel": standardize each channel over the tokens per sample (as in data2vec)
+                   so a near-constant channel gives no target signal.
+    """
+
+    VALID_TARGET_NORMS = (None, "none", "channel")
+
+    def __init__(self, target_norm: str | None = None, eps: float = 1e-6):
         super().__init__()
+        if target_norm not in self.VALID_TARGET_NORMS:
+            raise ValueError(
+                f"Invalid JEPA target_norm {target_norm!r}, "
+                f"expected one of {self.VALID_TARGET_NORMS}"
+            )
+        self.target_norm = None if target_norm == "none" else target_norm
+        self.eps = eps
 
     def forward(self, z, level_idx=None):
+        if self.target_norm == "channel":
+            # z: [..., tokens, channels], mean and variance over tokens in float32
+            zf = z.float()
+            mean = zf.mean(dim=-2, keepdim=True)
+            var = zf.var(dim=-2, keepdim=True, unbiased=False)
+            z = ((zf - mean) * torch.rsqrt(var + self.eps)).to(z.dtype)
         return z
