@@ -141,7 +141,11 @@ class EncoderModule(torch.nn.Module):
             cf, self.num_healpix_cells, tap_global_layers=tap_global_layers
         )
 
-        self.ln = torch.nn.LayerNorm(cf.ae_global_dim_embed, elementwise_affine=False)
+        # Option for learnable per-channel scale and offset in the encoder output norm (default off)
+        self.ln = torch.nn.LayerNorm(
+            cf.ae_global_dim_embed,
+            elementwise_affine=bool(cf.get("ae_global_out_norm_affine", False)),
+        )
 
     def forward(self, model_params, batch):
         """
