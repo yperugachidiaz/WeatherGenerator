@@ -989,7 +989,20 @@ class Model(torch.nn.Module):
                     "latent_state",
                     self.tokens_to_latent_state(None, tokens),
                 )
-                output = self.predict_decoders(model_params, step, tokens, source_samples, output)
+                # Training: add noise sigma ~ U(0, decoder_latent_noise_max) to decoder input.
+                # This makes the decoder robust to errors in generated latents (from RAE, LV-RAE).
+                dec_tokens = tokens
+                dec_noise_max = self.cf.get("decoder_latent_noise_max", 0.0)
+                if self.training and dec_noise_max > 0.0:
+                    sigma = dec_noise_max * torch.rand(
+                        (tokens.shape[0],) + (1,) * (tokens.dim() - 1),
+                        device=tokens.device,
+                        dtype=tokens.dtype,
+                    )
+                    dec_tokens = tokens + sigma * torch.randn_like(tokens)
+                output = self.predict_decoders(
+                    model_params, step, dec_tokens, source_samples, output
+                )
 
             if "student_teacher" in self.cf.training_config.training_mode:
                 # latent predictions (raw and with SSL heads)
