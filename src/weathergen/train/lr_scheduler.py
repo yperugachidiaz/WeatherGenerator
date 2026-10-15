@@ -189,6 +189,14 @@ class LearningRateScheduler:
             optimizer.step()
             for _ in range(self.step_contd):
                 self.step()
+        self._apply_lr_factors()
+
+    def _apply_lr_factors(self):
+        """Set lr of param groups with an "lr_factor" to scheduled lr * factor e.g. for encoder."""
+        base = self.lr[0] if isinstance(self.lr, list) else self.lr
+        for g in self.optimizer.param_groups:
+            if "lr_factor" in g:
+                g["lr"] = base * g["lr_factor"]
 
     def step(self):
         """
@@ -233,6 +241,7 @@ class LearningRateScheduler:
             str = f"Switching lr scheduler to '{self.policy_cooldown}' at step = {self.i_step}."
             logging.getLogger("obslearn").info(str)
 
+        self._apply_lr_factors()
         self.i_step += 1
 
         return self.lr

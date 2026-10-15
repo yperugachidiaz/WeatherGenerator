@@ -70,8 +70,27 @@ class AdamW:
     """
 
     def __init__(self, model: torch.nn.Module, optimizer_cfg, shared_lr_cfg, kappa: float):
+        # Option train the encoder with lower learning rate (scheduled lr * encoder_lr_factor)
+        # by putting its parameters in separate param group
+        enc_factor = float(optimizer_cfg.get("encoder_lr_factor", 1.0))
+        if enc_factor != 1.0:
+            named = [(n.removeprefix("module."), p) for n, p in model.named_parameters()]
+            params = [
+                {"params": [p for n, p in named if not n.startswith("encoder.")]},
+                {
+                    "params": [p for n, p in named if n.startswith("encoder.")],
+                    "lr_factor": enc_factor,
+                },
+            ]
+            if is_root():
+                logger.info(
+                    f"AdamW: encoder learning rate = {enc_factor} x scheduled learning rate "
+                    f"({len(params[1]['params'])} encoder tensors)"
+                )
+        else:
+            params = model.parameters()
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            params,
             lr=shared_lr_cfg.lr_start,
             weight_decay=optimizer_cfg.weight_decay,
             fused=True,
@@ -93,6 +112,10 @@ class Muon:
     """
 
     def __init__(self, model: torch.nn.Module, optimizer_cfg, shared_lr_cfg, kappa: float):
+        # Separate learning rate for encoder, only implemented for AdamW
+        assert float(optimizer_cfg.get("encoder_lr_factor", 1.0)) == 1.0, (
+            "encoder_lr_factor is only supported with the adamw optimizer"
+        )
         muon_cfg = optimizer_cfg.muon
         muon_params = [p for p in model.parameters() if p.requires_grad and p.ndim == 2]
         adamw_params = [p for p in model.parameters() if p.requires_grad and p.ndim != 2]
