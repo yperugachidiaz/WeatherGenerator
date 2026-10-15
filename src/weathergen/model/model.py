@@ -786,6 +786,8 @@ class Model(torch.nn.Module):
 
         tokens, posteriors, intermediates = self.encoder(model_params, batch)
         output.add_latent_prediction(0, "posteriors", posteriors)
+        # Latent of encoder for LossLatentRegularization in every training mode
+        output.add_latent_prediction(0, "encoder_tokens", tokens)
 
         # recover batch dimension and separate input_steps
         shape = (len(batch), batch.get_num_steps(), *tokens.shape[1:])
