@@ -140,8 +140,8 @@ class ModelParams(torch.nn.Module):
         )
         self.pe_global = torch.nn.Parameter(pe, requires_grad=False)
 
-        # RoPE coordinates
-        self.rope_2D = cf.get("rope_2D", False)
+        # rope coordinates used by encoder (rope_2D) or forecast engine (fe_rope_2D)
+        self.rope_2D = cf.get("rope_2D", False) or bool(cf.get("fe_rope_2D", None))
         if self.rope_2D:
             self.num_extra_tokens = cf.num_register_tokens + cf.num_class_tokens
             total_tokens = (
