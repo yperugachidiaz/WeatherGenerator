@@ -1,0 +1,5 @@
+# 2D RoPE off in the encoder (as skkbxfya was trained) but on in the diffusion network (as mx7k88dy), which
+# needs it: with concat conditioning RoPE is the only position information of the noisy tokens.
+# Needs the fe_rope_2D option (branch ypd/dev-ssl-diff/fe-rope-option).
+rope_2D: false
+fe_rope_2D: true
