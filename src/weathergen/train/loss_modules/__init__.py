@@ -8,7 +8,8 @@
 # nor does it submit to any jurisdiction.
 
 from .loss_module_latent_diffusion import LossLatentDiffusion
+from .loss_module_latent_rollout import LossLatentRollout
 from .loss_module_physical import LossPhysical
 from .loss_module_ssl import LossLatentSSLStudentTeacher
 
-__all__ = [LossPhysical, LossLatentSSLStudentTeacher, LossLatentDiffusion]
+__all__ = [LossPhysical, LossLatentSSLStudentTeacher, LossLatentDiffusion, LossLatentRollout]

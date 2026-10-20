@@ -137,6 +137,17 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 )
             self.teacher_time_offset = 0
 
+        # Latent loss per forecast step (LossLatentRollout).
+        # Target samples also get input data of each future time window (t+1, t+2, ...)
+        self.latent_rollout_targets = any(
+            loss_cfg.get("type") == "LossLatentRollout"
+            for loss_cfg in (mode_cfg.get("losses") or {}).values()
+        )
+        if self.latent_rollout_targets:
+            assert "student_teacher" not in training_mode and "latent_loss" not in training_mode, (
+                "LossLatentRollout does not work with student_teacher (JEPA, diffusion)."
+            )
+
         self.batch_size = get_batch_size_from_config(mode_cfg)
         self.num_workers = cf.data_loading.num_workers
         self.shuffle = mode_cfg.shuffle
@@ -640,6 +651,73 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return (input_data, output_data)
 
+    def _get_latent_rollout_windows(self, base_idx, num_forecast_steps, stream_ds) -> list:
+        """
+        Encoder input data at each forecast step (t+1, t+2, ...), encoded as latent targets for
+        LossLatentRollout
+        """
+
+        input_data = []
+        if is_stream_diagnostic(stream_ds[0].stream_info, self._stage):
+            return input_data
+
+        num_output_steps = self._get_output_length(num_forecast_steps)
+        for timestep_idx in range(self.output_offset, num_output_steps):
+            step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
+
+            rdata = collect_datasources(stream_ds, step_forecast_dt, "source", self.rng)
+
+            if rdata.is_empty():
+                # work around for https://github.com/pytorch/pytorch/issues/158719
+                # create non-empty mean data instead of empty tensor
+                time_win = self.time_window_handler.window(step_forecast_dt)
+                rdata = spoof(
+                    self.healpix_level,
+                    time_win.start,
+                    stream_ds[0].get_geoinfo_size(),
+                    len(stream_ds[0].mean[stream_ds[0].source_idx]),
+                )
+                rdata.is_spoof = True
+
+            input_data += [rdata]
+
+        return input_data
+
+    def _build_latent_rollout_input(
+        self,
+        stream_data: StreamData,
+        base_idx: TIndex,
+        stream_info: dict,
+        input_data: list,
+        input_tokens: list,
+    ) -> StreamData:
+        """
+        Add the encoder input data of each forecast step to the target sample (all cells, no
+        masking)
+        """
+
+        cell_mask = np.ones(self.num_healpix_cells, dtype=bool)
+        for step, (rdata, token_data) in enumerate(zip(input_data, input_tokens, strict=True)):
+            if token_data[0] is None and token_data[1] is None:
+                continue
+
+            timestep_idx = self.output_offset + step
+            step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
+            time_win = self.time_window_handler.window(step_forecast_dt)
+
+            (source_cells, source_cells_lens) = self.tokenizer.get_source(
+                stream_info,
+                rdata,
+                token_data,
+                (time_win.start, time_win.end),
+                cell_mask,
+            )
+            # raw data not needed for the latent targets (saves shared memory in validation)
+            stream_data.add_source(self._stage, step, None, source_cells_lens, source_cells, False)
+            stream_data.latent_rollout_is_spoof[step] = rdata.is_spoof
+
+        return stream_data
+
     def _get_source_target_masks(self, training_mode):
         """
         Generate source and target masks for all streams.
@@ -704,6 +782,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             raise NotImplementedError(f"Unsupported training mode {mode}.")
 
         num_output_steps = self._get_output_length(num_forecast_steps)
+        num_latent_rollout_steps = num_output_steps - self.output_offset
         batch = ModelBatch(
             list(self.streams_datasets.keys()),
             num_source_samples,
@@ -756,6 +835,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 input_tokens_target = input_tokens
                 output_tokens_target = output_tokens
 
+            if self.latent_rollout_targets:
+                latent_rollout_data = self._get_latent_rollout_windows(
+                    idx, num_forecast_steps, stream_ds.readers
+                )
+                latent_rollout_tokens = self.tokenizer.get_tokens_windows(
+                    stream_info, latent_rollout_data, True
+                )
+
             for sidx, source_mask in enumerate(source_masks.masks):
                 # Map each source to its target
                 tidx = source_to_target[sidx].item()
@@ -805,7 +892,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     target_idx,
                     num_forecast_steps,
                     stream_info,
-                    target_masks.metadata[tidx].params.get("num_steps_input", 1),
+                    num_latent_rollout_steps
+                    if self.latent_rollout_targets
+                    else target_masks.metadata[tidx].params.get("num_steps_input", 1),
                     input_data_target,
                     output_data_target,
                     input_tokens_target,
@@ -813,6 +902,11 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     output_mask=target_mask,
                     input_mask=target_mask,
                 )
+
+                if self.latent_rollout_targets:
+                    sdata = self._build_latent_rollout_input(
+                        sdata, idx, stream_info, latent_rollout_data, latent_rollout_tokens
+                    )
 
                 target_metadata = target_masks.metadata[tidx]
 
@@ -838,6 +932,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         source_in_steps = input_steps.max().item()
         target_in_steps = np.array([tc.get("num_steps_input", 1) for _, tc in target_cfgs.items()])
         target_in_steps = 1 if len(target_in_steps) == 0 else target_in_steps.max().item()
+        if self.latent_rollout_targets:
+            target_in_steps = num_latent_rollout_steps
         batch = self._preprocess_model_batch(batch, source_in_steps, target_in_steps)
 
         # add target times in source for diffusion model date/time conditioning

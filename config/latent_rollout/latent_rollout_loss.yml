@@ -1,0 +1,28 @@
+# Overlay: latent loss per forecast step (LossLatentRollout).
+#
+# The latent state after each forecast step is compared (MSE) with the encoder's latent of the
+# source data at that step, computed by the model's own encoder without gradients and in eval
+# mode (LatentRolloutTargets). The physical loss stays as it is.
+#
+# Set the weight per run, e.g. pipeline option training_config.losses.latent_rollout.weight=0.01.
+# Weight 0 changes nothing in training but still logs, per step (train and validation):
+#   LossLatentRollout.mse.step<k>                  latent error at forecast step k
+#   LossLatentRollout.norm_ratio_cells.step<k>     |pred| / |target| of the healpix cell tokens
+#   LossLatentRollout.norm_ratio_aux.step<k>       same for the register (and class) tokens
+#   LossLatentRollout.mse(.cells/.aux)             averages over the steps
+#   LossLatentRollout.token_std_target / _pred     spread of the cell tokens across cells: a drop
+#                                                  in the weighted runs vs weight 0 = collapse
+#                                                  (the encoder is trained, the target is not
+#                                                  frozen across steps)
+#
+# Tokens in the loss: latent_rollout_loss_tokens = "all" (default), "cells" or "aux".
+
+training_config:
+  losses:
+    latent_rollout:
+      enabled: True
+      type: LossLatentRollout
+      weight: 0.0
+      target_and_aux_calc: LatentRolloutTargets
+      loss_fcts:
+        mse: {}

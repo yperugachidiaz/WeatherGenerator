@@ -87,6 +87,8 @@ class StreamData:
 
         self.source_is_spoof = [False for _ in range(self.input_steps)]
         self.target_is_spoof = [False for _ in range(self.output_steps)]
+        # spoof flags of LossLatentRollout inputs to make sure they do not mask the physical loss
+        self.latent_rollout_is_spoof = [False for _ in range(self.input_steps)]
 
         # initialize empty members
         self.sample_idx = idx

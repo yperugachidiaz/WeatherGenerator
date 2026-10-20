@@ -37,6 +37,7 @@ from weathergen.train.collapse_monitor import CollapseMonitor
 from weathergen.train.loss_calculator import LossCalculator
 from weathergen.train.lr_scheduler import LearningRateScheduler
 from weathergen.train.optimizer import build_optimizer
+from weathergen.train.target_and_aux_latent_rollout import LatentRolloutTargets
 from weathergen.train.target_and_aux_ssl_teacher import EMATeacher
 from weathergen.train.target_and_aux_utils import get_target_aux_calculator
 from weathergen.train.trainer_base import TrainerBase
@@ -869,11 +870,19 @@ class Trainer(TrainerBase):
                                 target_aux,
                             ) in self.target_and_aux_calculators_val.items():
                                 target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
+                                # if validate_with_ema is enabled, compute the latent rollout
+                                # targets with the EMA copy
+                                model_targets = (
+                                    self.ema_model.ema_model
+                                    if self.ema_model is not None
+                                    and isinstance(target_aux, LatentRolloutTargets)
+                                    else self.model
+                                )
                                 targets_and_auxs[loss_name] = target_aux.compute(
                                     self.cf.general.istep,
                                     batch.get_target_samples(target_idxs),
                                     self.model_params,
-                                    self.model,
+                                    model_targets,
                                 )
 
                             preds, targets_and_auxs = self._process_validation_chunks(

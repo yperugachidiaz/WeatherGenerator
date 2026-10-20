@@ -198,8 +198,17 @@ training_config:
         type: LossPhysical,
         loss_fcts: { "mse": { }, },
         },
+    # Latent rollout loss: MSE between the forecast latent after each step and the encoder
+    # latent of the true input at that step (target without gradient). To enable, set enabled to True.
+    "latent_rollout": {
+        enabled: False,
+        type: LossLatentRollout,
+        weight: 0.01,
+        target_and_aux_calc: LatentRolloutTargets,
+        loss_fcts: { "mse": { }, },
+        },
     }
-  
+
   model_input: {
     "forecasting" : {
       # masking strategy: "random", "healpix", "forecast"
