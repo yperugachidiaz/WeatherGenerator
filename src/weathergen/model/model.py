@@ -810,6 +810,8 @@ class Model(torch.nn.Module):
         source_samples, tokens, posteriors, intermediates = self._get_initial_conditions(
             samples_or_output, model_params
         )
+        # Latent of encoder for LossLatentRegularization in every training mode (first chunk only)
+        encoder_tokens = tokens if len(samples_or_output.latent) == 0 else None
 
         # output_idxs start with output_offset
         global_steps = source_samples.get_output_idxs()
@@ -874,6 +876,8 @@ class Model(torch.nn.Module):
         # posteriors come from encoding the source window, so they exist only on the first chunk
         if posteriors is not None:
             output.add_latent_prediction(0, "posteriors", posteriors)
+        if encoder_tokens is not None:
+            output.add_latent_prediction(0, "encoder_tokens", encoder_tokens)
 
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)

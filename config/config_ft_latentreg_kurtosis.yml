@@ -1,0 +1,13 @@
+# Kurtosis penalty on the encoder output during forecast fine-tuning.
+# Overlay on top of config_gjl_repro_finetune_forecast_n320_iasi_channels.yml. Adds the loss term
+# LossLatentRegularization (loss_module_latent_reg.py): weight * relu(excess kurtosis) of the encoder
+# cell tokens per sample, as in the JEPA test kr9snxa0 and Seb's screen arm B. It also logs the latent
+# diagnostics (largest channel share, excess kurtosis) every step.
+training_config:
+  losses:
+    latent_reg:
+      type: LossLatentRegularization
+      weight: 1.0
+      loss_fcts:
+        kurtosis:
+          weight: 0.01
