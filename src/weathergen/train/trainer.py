@@ -678,23 +678,35 @@ class Trainer(TrainerBase):
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
+
+                def compute_targets(batch):
+                    targets_and_auxs = {}
+                    for loss_name, target_aux in self.target_and_aux_calculators.items():
+                        # find targets for this target-aux calculator
+                        target_idxs = get_target_idxs_from_cfg(self.training_cfg, loss_name)
+                        # apply target-aux calculator
+                        targets_and_auxs[loss_name] = target_aux.compute(
+                            self.cf.general.istep,
+                            batch.get_target_samples(target_idxs),
+                            self.model_params,
+                            self.model,
+                        )
+                    return targets_and_auxs
+
+                # LossLatentRollout: encode targets before the forward pass (lower peak GPU memory)
+                # Encoder memory is therefore freed before the forward graph is built
+                targets_first = not self.include_target_source
+                if targets_first:
+                    targets_and_auxs = compute_targets(batch)
+
                 preds = self.model(
                     model_params=self.model_params,
                     samples_or_output=batch.get_source_samples(),
                     forecast_steps=batch.get_output_idxs(),
                 )
 
-                targets_and_auxs = {}
-                for loss_name, target_aux in self.target_and_aux_calculators.items():
-                    # find targets for this target-aux calculator
-                    target_idxs = get_target_idxs_from_cfg(self.training_cfg, loss_name)
-                    # apply target-aux calculator
-                    targets_and_auxs[loss_name] = target_aux.compute(
-                        self.cf.general.istep,
-                        batch.get_target_samples(target_idxs),
-                        self.model_params,
-                        self.model,
-                    )
+                if not targets_first:
+                    targets_and_auxs = compute_targets(batch)
 
             loss = self.loss_calculator.compute_loss(
                 preds=preds,
