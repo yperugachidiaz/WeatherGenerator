@@ -75,14 +75,22 @@ class LatentRolloutTargets(TargetAndAuxModuleBase):
         encoder = getattr(model, "module", model).encoder
 
         # Encode in eval mode and one step at a time (all steps at once crashes flash attention
-        # for large streams), then restore the train/eval mode of each module
+        # for large streams), then restore the train/eval mode of each module. The input of each
+        # step goes to the GPU only for its encoding (the trainer keeps it on the CPU).
+        device = next(encoder.parameters()).device
         modes = [(module, module.training) for module in encoder.modules()]
         encoder.eval()
         with torch.no_grad():
-            tokens = [
-                encoder(model_params, _select_input_step(batch, i))[0]
-                for i in range(len(output_idxs))
-            ]
+            tokens = []
+            for i in range(len(output_idxs)):
+                batch_step = _select_input_step(batch, i).to_device(
+                    device,
+                    target_steps=[],
+                    include_target_coords=False,
+                    include_target_tokens=False,
+                )
+                tokens.append(encoder(model_params, batch_step)[0])
+                del batch_step
         for module, mode in modes:
             module.training = mode
 

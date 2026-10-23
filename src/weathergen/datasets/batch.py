@@ -366,13 +366,14 @@ class ModelBatch:
 
         return self
 
-    def to_device(self, device):  # -> ModelBatch
+    def to_device(self, device, include_target_source: bool = True):  # -> ModelBatch
         """
-        Move batch to device
+        Move batch to device; include_target_source=False keeps the source data of the target
+        samples on the CPU (LossLatentRollout moves it step by step itself)
         """
 
         self.source_samples.to_device(device)
-        self.target_samples.to_device(device)
+        self.target_samples.to_device(device, include_source=include_target_source)
 
         self.device = device
 

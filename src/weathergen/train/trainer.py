@@ -132,6 +132,7 @@ class Trainer(TrainerBase):
         self.t_start: float = 0
         self.target_and_aux_calculators = None
         self.target_and_aux_calculators_val = None
+        self.include_target_source = True
         self.validate_with_ema_cfg = None
         self.validate_with_ema: bool = False
         self.batch_size_per_gpu = -1
@@ -522,6 +523,13 @@ class Trainer(TrainerBase):
         # get target_aux calculators for different loss terms
         self.target_and_aux_calculators = self.get_target_aux_calculators(self.training_cfg)
         self.target_and_aux_calculators_val = self.get_target_aux_calculators(self.validation_cfg)
+        # LossLatentRollout: the input of every forecast step (~2.3 GB each) stays on the CPU,
+        # the latent targets move one step at a time to the GPU
+        self.include_target_source = not any(
+            isinstance(calc, LatentRolloutTargets)
+            for calcs in (self.target_and_aux_calculators, self.target_and_aux_calculators_val)
+            for calc in calcs.values()
+        )
 
         # Restore EMA teacher weights when continuing from a checkpoint
         if run_id_contd is not None:
@@ -663,7 +671,7 @@ class Trainer(TrainerBase):
                 # pin memory for faster CPU-GPU transfer
                 batch = batch.pin_memory()
 
-            batch.to_device(self.device)
+            batch.to_device(self.device, include_target_source=self.include_target_source)
 
             with torch.autocast(
                 device_type=f"cuda:{cf.local_rank}",
@@ -851,7 +859,9 @@ class Trainer(TrainerBase):
                     for bidx, batch in enumerate(dataset_val_iter):
                         compute_full_loss = mode_cfg.get("compute_full_validation_loss", True)
                         if compute_full_loss or is_diffusion:
-                            batch.to_device(self.device)
+                            batch.to_device(
+                                self.device, include_target_source=self.include_target_source
+                            )
                         else:
                             output_idxs = batch.get_output_idxs()
                             chunk_size = mode_cfg.forecast.get("chunk_size", len(output_idxs))
