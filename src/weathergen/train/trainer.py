@@ -715,6 +715,11 @@ class Trainer(TrainerBase):
                 istep=self.cf.general.istep,
             )
             loss_value = self._get_tensor_item(loss.detach())
+            # Free the LossLatentRollout targets before the backward pass (lower peak GPU memory)
+            if not self.include_target_source:
+                for loss_name, target_aux in self.target_and_aux_calculators.items():
+                    if isinstance(target_aux, LatentRolloutTargets):
+                        targets_and_auxs[loss_name].latent = []
             if self._maybe_log_loss_spike(loss_value, batch, mini_epoch, bidx):
                 self._drop_latest_loss_record()
                 for optimizer in self.optimizers:
@@ -1483,7 +1488,13 @@ class Trainer(TrainerBase):
                     )
                     if self.log_grad_norms:
                         pstr += f"gradient norm={self.last_grad_norm:.3f}, "
-                    pstr += f"s/sec={(print_freq * self.batch_size_per_gpu) / dt:.3f})"
+                    pstr += f"s/sec={(print_freq * self.batch_size_per_gpu) / dt:.3f}"
+                    if torch.cuda.is_available():
+                        # Peak GPU memory since the last print
+                        peak = torch.cuda.max_memory_allocated(self.device) / 2**30
+                        pstr += f", peak GPU memory={peak:.1f} GiB"
+                        torch.cuda.reset_peak_memory_stats(self.device)
+                    pstr += ")"
                     logger.info(pstr)
                     logger.info("\t")
 

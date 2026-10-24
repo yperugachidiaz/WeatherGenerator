@@ -12,6 +12,7 @@ import logging
 import torch
 from omegaconf import DictConfig
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 import weathergen.train.loss_modules.loss_functions as loss_fns
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
@@ -74,6 +75,14 @@ class LossLatentRollout(LossModuleBase):
         loss, _ = loss_fct(target=target, pred=pred)
         return loss
 
+    def _loss_with_grad(self, loss_fct, target: Tensor, pred: Tensor) -> Tensor:
+        # Recomputed in the backward pass and keeps only its inputs (lower peak GPU memory)
+        return self._loss_per_loss_function(
+            loss_fct,
+            self._select_tokens(target, self.tokens).float(),
+            self._select_tokens(pred, self.tokens).float(),
+        )
+
     @staticmethod
     def _norm_ratio(target: Tensor, pred: Tensor) -> Tensor:
         return torch.linalg.vector_norm(pred) / torch.linalg.vector_norm(target)
@@ -104,17 +113,17 @@ class LossLatentRollout(LossModuleBase):
             if "latent_state" not in preds_cur or "latent_rollout" not in targets_cur:
                 continue
 
-            pred = preds_cur["latent_state"].z_pre_norm.float()
-            target = targets_cur["latent_rollout"].float()
+            pred_raw = preds_cur["latent_state"].z_pre_norm
+            target_raw = targets_cur["latent_rollout"]
+            with torch.no_grad():
+                pred, target = pred_raw.float(), target_raw.float()  # only for logging
             spoofed = is_spoof.get(step, False)
 
             loss_step = torch.tensor(0.0, device=self.device, requires_grad=True)
             for loss_fct, loss_fct_weight, loss_fct_name in self.loss_fcts:
                 key = f"{self.name}.{loss_fct_name}"
-                loss_lfct = self._loss_per_loss_function(
-                    loss_fct,
-                    self._select_tokens(target, self.tokens),
-                    self._select_tokens(pred, self.tokens),
+                loss_lfct = checkpoint(
+                    self._loss_with_grad, loss_fct, target_raw, pred_raw, use_reentrant=False
                 )
                 loss_step = loss_step + loss_fct_weight * loss_lfct
 

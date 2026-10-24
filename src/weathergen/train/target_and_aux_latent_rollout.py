@@ -89,7 +89,8 @@ class LatentRolloutTargets(TargetAndAuxModuleBase):
                     include_target_coords=False,
                     include_target_tokens=False,
                 )
-                tokens.append(encoder(model_params, batch_step)[0])
+                # bf16 halves the memory of the targets kept until the backward pass
+                tokens.append(encoder(model_params, batch_step)[0].to(torch.bfloat16))
                 del batch_step
         for module, mode in modes:
             module.training = mode
