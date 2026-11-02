@@ -92,6 +92,9 @@ class LatentRolloutTargets(TargetAndAuxModuleBase):
                 # bf16 halves the memory of the targets kept until the backward pass
                 tokens.append(encoder(model_params, batch_step)[0].to(torch.bfloat16))
                 del batch_step
+        # Clear bf16 weights autocast cached in this no_grad pass, else the training forward
+        # reuses them and encoder gets no gradient
+        torch.clear_autocast_cache()
         for module, mode in modes:
             module.training = mode
 
