@@ -1,0 +1,7 @@
+# MoE MLP in forecasting engine, everything else from run it starts from
+fe_mlp_type: "moe"
+fe_moe_num_experts: 8
+fe_moe_top_k: 2
+fe_moe_hidden_factor: 1.0  # expert hidden 2048 and 2 experts per token = dense MLP compute
+fe_moe_num_dense_blocks: 1
+moe_bias_update_rate: 1.0e-3

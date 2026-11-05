@@ -64,6 +64,13 @@ fe_with_qk_lnorm: True
 fe_diffusion_model: False
 fe_layer_norm_after_blocks: []  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
 fe_impute_latent_noise_std: 0.0  # 1e-4
+fe_mlp_hidden_factor: 2  # hidden size dense MLP = factor * dim
+fe_mlp_type: "mlp"  # "mlp" (dense) or "moe" (mixture of experts)
+fe_moe_num_experts: 8
+fe_moe_top_k: 2  # experts per token
+fe_moe_hidden_factor: 1.0  # hidden size expert = factor * dim, top_k * factor = 2 matches dense compute
+fe_moe_num_dense_blocks: 1  # first n blocks stay dense MLP
+moe_bias_update_rate: 1.0e-3  # step routing bias to balance experts, 0 = off
 # currently fixed to 1.0 (due to limitations with flex_attention and triton)
 forecast_att_dense_rate: 1.0
 

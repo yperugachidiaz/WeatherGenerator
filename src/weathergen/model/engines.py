@@ -30,6 +30,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.moe import MoEMLP
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -681,22 +682,7 @@ class ForecastingEngine(torch.nn.Module):
                         )
                     )
                 # Add MLP block
-                self.fe_blocks.append(
-                    MLP(
-                        _inner_dim,
-                        _inner_dim,
-                        num_layers=2,
-                        with_residual=True,
-                        dropout_rate=self.cf.fe_dropout_rate,
-                        mlp_type=self.cf.get("mlp_type", "mlp"),
-                        norm_type=self.cf.norm_type,
-                        dim_aux=dim_aux,
-                        norm_eps=self.cf.mlp_norm_eps,
-                        is_dit=self.cf.get("fe_diffusion_model", False),
-                        dit_is_cond=self.cf.get("fe_diffusion_model_conditioning_type", None)
-                        == "ada_ln",
-                    )
-                )
+                self.fe_blocks.append(self._create_mlp(i, _inner_dim, dim_aux))
                 # Optionally, add LayerNorm after i-th layer
                 if i in self.cf.get("fe_layer_norm_after_blocks", []):
                     self.fe_blocks.append(torch.nn.LayerNorm(_inner_dim, elementwise_affine=False))
@@ -706,6 +692,8 @@ class ForecastingEngine(torch.nn.Module):
                 torch.nn.init.normal_(m.weight, mean=0, std=0.001)
                 if m.bias is not None:
                     torch.nn.init.normal_(m.bias, mean=0, std=0.001)
+            elif isinstance(m, MoEMLP):
+                m.init_experts_normal(std=0.001)
 
         for block in self.fe_blocks:
             block.apply(init_weights_final)
@@ -713,6 +701,48 @@ class ForecastingEngine(torch.nn.Module):
         # For concatenate_hiddendim: project 2D -> D after the full forward pass
         self.out_proj = (
             torch.nn.Linear(_inner_dim, _diffusion_latent_dim, bias=False) if _concat_hd else None
+        )
+
+    def _create_mlp(self, block_idx: int, dim: int, dim_aux: int | None) -> MLP | MoEMLP:
+        """
+        Dense MLP or MoE MLP when fe_mlp_type is "moe".
+        First fe_moe_num_dense_blocks blocks always stay dense.
+        """
+        kwargs = dict(
+            with_residual=True,
+            dropout_rate=self.cf.fe_dropout_rate,
+            norm_type=self.cf.norm_type,
+            dim_aux=dim_aux,
+            norm_eps=self.cf.mlp_norm_eps,
+        )
+
+        fe_mlp_type = self.cf.get("fe_mlp_type", "mlp")
+        if fe_mlp_type not in {"mlp", "moe"}:
+            raise ValueError(f"Unsupported fe_mlp_type: {fe_mlp_type}")
+
+        if fe_mlp_type == "moe":
+            # experts are plain GELU MLPs thus no DiT conditioning or SwiGLU
+            if self.cf.get("fe_diffusion_model", False) or self.cf.get("mlp_type", "mlp") != "mlp":
+                raise ValueError("fe_mlp_type moe needs fe_diffusion_model False and mlp_type mlp")
+            if block_idx >= self.cf.get("fe_moe_num_dense_blocks", 1):
+                return MoEMLP(
+                    dim,
+                    dim,
+                    num_experts=self.cf.get("fe_moe_num_experts", 8),
+                    top_k=self.cf.get("fe_moe_top_k", 2),
+                    hidden_factor=self.cf.get("fe_moe_hidden_factor", 1.0),
+                    **kwargs,
+                )
+
+        return MLP(
+            dim,
+            dim,
+            num_layers=2,
+            hidden_factor=self.cf.get("fe_mlp_hidden_factor", 2),
+            mlp_type=self.cf.get("mlp_type", "mlp"),
+            is_dit=self.cf.get("fe_diffusion_model", False),
+            dit_is_cond=self.cf.get("fe_diffusion_model_conditioning_type", None) == "ada_ln",
+            **kwargs,
         )
 
     def forward(

@@ -29,6 +29,7 @@ from weathergen.model.attention import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
+from weathergen.model.moe import MoEMLP
 from weathergen.model.utils import (
     apply_fct_to_blocks,
     broadcast_matching_params,
@@ -111,6 +112,7 @@ def init_model_and_shard(
         }
         modules_to_shard = (
             MLP,
+            MoEMLP,
             MultiSelfAttentionHeadLocal,
             MultiSelfAttentionHead,
             MultiCrossAttentionHeadVarlen,
