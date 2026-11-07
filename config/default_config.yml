@@ -81,6 +81,9 @@ fe_rope_2D: null
 # Scale of the lat/lon in radians given to 2D RoPE, about 30 makes neighbouring cells differ by 1.
 # Coords are rebuilt at start and not in checkpoints, thus a run must use the scale it was trained with
 rope_2D_coord_scale: 1.0
+# RoPE coords in float32 instead of attention_dtype, bf16 rounds them by up to half a cell at scale 30.
+# Off keeps old runs identical. A run must use the setting it was trained with
+rope_2D_coords_fp32: False
 # pe_global from lat/lon of the cells. Default code repeats every ae_global_dim_embed / 2 cells.
 # A run must use the setting it was trained with, pe_global is rebuilt at start and not in checkpoints
 pe_global_latlon: False

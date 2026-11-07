@@ -143,6 +143,8 @@ class ModelParams(torch.nn.Module):
         # rope coordinates used by encoder (rope_2D) or forecast engine (fe_rope_2D)
         self.rope_2D = cf.get("rope_2D", False) or bool(cf.get("fe_rope_2D", None))
         if self.rope_2D:
+            # bf16 rounds scaled coords by up to half a cell at x30 thus option for float32
+            rope_dtype = torch.float32 if cf.get("rope_2D_coords_fp32", False) else self.dtype
             self.num_extra_tokens = cf.num_register_tokens + cf.num_class_tokens
             total_tokens = (
                 self.num_healpix_cells + self.num_extra_tokens
@@ -153,7 +155,7 @@ class ModelParams(torch.nn.Module):
                     1,
                     total_tokens,
                     2,
-                    dtype=self.dtype,
+                    dtype=rope_dtype,
                 ),
             )
             self.register_buffer(
@@ -161,7 +163,7 @@ class ModelParams(torch.nn.Module):
                 torch.zeros(
                     self.num_healpix_cells,
                     2,
-                    dtype=self.dtype,
+                    dtype=rope_dtype,
                 ),
             )
         else:
