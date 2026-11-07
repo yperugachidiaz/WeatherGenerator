@@ -618,6 +618,17 @@ class ForecastingEngine(torch.nn.Module):
         #  Sets 2D rope for forecast engine only. If not set, rope_2D is used
         fe_rope = self.cf.get("fe_rope_2D", None)
         with_2d_rope = self.cf.get("rope_2D", False) if fe_rope is None else fe_rope
+        # Own block settings for forecast engine only. If not set, the shared key is used
+        fe_mlp_type = self.cf.get("fe_mlp_type", None)
+        mlp_type = self.cf.get("mlp_type", "mlp") if fe_mlp_type is None else fe_mlp_type
+        fe_use_xsa = self.cf.get("fe_use_xsa", None)
+        use_xsa = self.cf.get("use_xsa", False) if fe_use_xsa is None else fe_use_xsa
+        fe_qk_norm_type = self.cf.get("fe_qk_norm_type", None)
+        qk_norm_type = (
+            self.cf.get("qk_norm_type", self.cf.norm_type)
+            if fe_qk_norm_type is None
+            else fe_qk_norm_type
+        )
 
         global_rate = int(1 / self.cf.forecast_att_dense_rate)
         if mode_cfg.get("forecast", {}).get("policy") is not None:
@@ -631,9 +642,9 @@ class ForecastingEngine(torch.nn.Module):
                             dropout_rate=self.cf.fe_dropout_rate,
                             with_qk_lnorm=self.cf.fe_with_qk_lnorm,
                             with_flash=self.cf.with_flash_attention,
-                            use_xsa=self.cf.get("use_xsa", False),
+                            use_xsa=use_xsa,
                             norm_type=self.cf.norm_type,
-                            qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
+                            qk_norm_type=qk_norm_type,
                             dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
@@ -653,9 +664,9 @@ class ForecastingEngine(torch.nn.Module):
                             dropout_rate=self.cf.fe_dropout_rate,
                             with_qk_lnorm=self.cf.fe_with_qk_lnorm,
                             with_flash=self.cf.with_flash_attention,
-                            use_xsa=self.cf.get("use_xsa", False),
+                            use_xsa=use_xsa,
                             norm_type=self.cf.norm_type,
-                            qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
+                            qk_norm_type=qk_norm_type,
                             dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
@@ -677,7 +688,7 @@ class ForecastingEngine(torch.nn.Module):
                             with_qk_lnorm=self.cf.fe_with_qk_lnorm,
                             with_flash=self.cf.with_flash_attention,
                             norm_type=self.cf.norm_type,
-                            qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
+                            qk_norm_type=qk_norm_type,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             is_dit=self.cf.get("fe_diffusion_model", False),
@@ -691,7 +702,7 @@ class ForecastingEngine(torch.nn.Module):
                         num_layers=2,
                         with_residual=True,
                         dropout_rate=self.cf.fe_dropout_rate,
-                        mlp_type=self.cf.get("mlp_type", "mlp"),
+                        mlp_type=mlp_type,
                         norm_type=self.cf.norm_type,
                         dim_aux=dim_aux,
                         norm_eps=self.cf.mlp_norm_eps,

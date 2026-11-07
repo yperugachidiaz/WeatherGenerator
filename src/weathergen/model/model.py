@@ -167,6 +167,13 @@ class ModelParams(torch.nn.Module):
         else:
             self.rope_coords = None
             self.rope_cell_coords = None
+        # forecast engine coordinates with fe_rope_2D_coord_scale. If null, it uses rope_coords
+        if self.rope_2D and cf.get("fe_rope_2D_coord_scale", None) is not None:
+            self.register_buffer(
+                "rope_coords_fe", torch.zeros(1, total_tokens, 2, dtype=self.dtype)
+            )
+        else:
+            self.rope_coords_fe = None
 
         # HEALPix neighbours
         hlc = self.healpix_level
@@ -235,16 +242,20 @@ class ModelParams(torch.nn.Module):
             # Precompute per-cell center coordinates (lat, lon in radians) for 2D RoPE.
             # Shape: (num_healpix_cells, ae_local_num_queries, 2)
             verts, _ = healpix_verts_rots(self.healpix_level, 0.5, 0.5)
-            coords = r3tos2(verts.to(self.rope_coords.device)).to(self.rope_coords.dtype)
+            coords_unscaled = r3tos2(verts.to(self.rope_coords.device)).to(self.rope_coords.dtype)
             # rope frequencies assume positions 0, 1, 2 while neighbouring cells differ by 0.03 rad
-            coords = coords * cf.get("rope_2D_coord_scale", 1.0)
+            coords = coords_unscaled * cf.get("rope_2D_coord_scale", 1.0)
             # Per-cell coords for QueryAggregationEngine (no query expansion)
             self.rope_cell_coords.data.copy_(coords)
-            coords = coords.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
-            coords_flat = coords.flatten(0, 1).unsqueeze(0)
+            buffers = [(self.rope_coords, coords)]
+            if self.rope_coords_fe is not None:
+                buffers += [(self.rope_coords_fe, coords_unscaled * cf.fe_rope_2D_coord_scale)]
             offset = self.num_extra_tokens * cf.ae_local_num_queries
-            self.rope_coords.data.fill_(0.0)
-            self.rope_coords.data[:, offset : offset + coords_flat.shape[1], :].copy_(coords_flat)
+            for buffer, coords in buffers:
+                coords = coords.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
+                coords_flat = coords.flatten(0, 1).unsqueeze(0)
+                buffer.data.fill_(0.0)
+                buffer.data[:, offset : offset + coords_flat.shape[1], :].copy_(coords_flat)
 
         # pe_global: always initialized. RoPE handles relative position in Q/K, but pe_global
         # provides per-cell token identity which is critical for masked cells that have no
@@ -893,13 +904,18 @@ class Model(torch.nn.Module):
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
 
+        # forecast engine gets own coordinates if fe_rope_2D_coord_scale is set
+        fe_coords = model_params.rope_coords
+        if model_params.rope_coords_fe is not None:
+            fe_coords = model_params.rope_coords_fe
+
         # roll-out in latent space, iterate and generate output over requested output steps
         for step in forecast_steps:
             without_grad = p_fwd and self.training and step != final_step
             if without_grad:
                 # Pushforward mode: advance tokens without grad; no decoding
                 with torch.no_grad():
-                    tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
+                    tokens = self.forecast_engine(tokens, step, fe_coords)
                 continue
 
             if self.forecast_engine:
@@ -908,7 +924,7 @@ class Model(torch.nn.Module):
                     tokens,
                     step,
                     meta_info=source_samples.samples[0].meta_info,
-                    coords=model_params.rope_coords,
+                    coords=fe_coords,
                 )
 
                 # Trajectory inspection mode: decode each ODE step as a separate forecast output

@@ -64,6 +64,10 @@ fe_with_qk_lnorm: True
 fe_diffusion_model: False
 fe_layer_norm_after_blocks: []  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
 fe_impute_latent_noise_std: 0.0  # 1e-4
+# Block settings for forecast engine only (e.g. diffusion network on encoder of other architecture)
+fe_mlp_type: null  # if null, mlp_type is used
+fe_use_xsa: null  # if null, use_xsa is used
+fe_qk_norm_type: null  # if null, qk_norm_type is used
 # currently fixed to 1.0 (due to limitations with flex_attention and triton)
 forecast_att_dense_rate: 1.0
 
@@ -81,6 +85,8 @@ fe_rope_2D: null
 # Scale of the lat/lon in radians given to 2D RoPE, about 30 makes neighbouring cells differ by 1.
 # Coords are rebuilt at start and not in checkpoints, thus a run must use the scale it was trained with
 rope_2D_coord_scale: 1.0
+# Scale of the RoPE coordinates in forecast engine only. If null, rope_2D_coord_scale is used
+fe_rope_2D_coord_scale: null
 # pe_global from lat/lon of the cells. Default code repeats every ae_global_dim_embed / 2 cells.
 # A run must use the setting it was trained with, pe_global is rebuilt at start and not in checkpoints
 pe_global_latlon: False
