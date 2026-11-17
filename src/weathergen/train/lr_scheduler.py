@@ -102,6 +102,8 @@ class LearningRateScheduler:
         elif self.policy_warmup == "cosine":
             n_steps = self.n_steps_warmup + self.n_steps_decay + 1
             pct_start = self.n_steps_warmup / n_steps
+            # torch default cycle_momentum=True sets beta1 to 0.85 thus configured beta1 was ignored
+            cycle_momentum = bool(lr_cfg.get("cycle_momentum", False))
             self.scheduler_warmup = OneCycleLR(
                 optimizer,
                 max_lr=self.lr_max_scaled,
@@ -109,6 +111,7 @@ class LearningRateScheduler:
                 pct_start=pct_start,
                 div_factor=self.lr_max_scaled / lr_cfg.lr_start,
                 final_div_factor=lr_final_decay_scaled / lr_cfg.lr_start,
+                cycle_momentum=cycle_momentum,
             )
         else:
             if self.n_steps_warmup > 0:

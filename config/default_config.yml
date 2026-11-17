@@ -195,6 +195,8 @@ training_config:
     policy_decay: "constant"
     policy_cooldown: "linear"
     parallel_scaling_policy: "sqrt"
+    # true reproduces old runs where OneCycleLR set adamw beta1 to 0.85
+    cycle_momentum: False
 
   optimizer:
     grad_clip: 1.0
