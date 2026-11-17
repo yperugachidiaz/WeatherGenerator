@@ -618,6 +618,20 @@ class ForecastingEngine(torch.nn.Module):
         )
         _diffusion_latent_dim = self.cf.get("fe_diffusion_latent_dim", self.cf.ae_global_dim_embed)
         _inner_dim = 2 * _diffusion_latent_dim if _concat_hd else _diffusion_latent_dim
+        #  Smaller forecast engine: Blocks run at fe_dim_embed, latent is projected down before the
+        #  blocks and back after
+        fe_dim_embed = self.cf.get("fe_dim_embed", None)
+        self.with_proj = fe_dim_embed is not None and fe_dim_embed != self.cf.ae_global_dim_embed
+        if self.with_proj:
+            assert not self.cf.get("fe_diffusion_model", False), (
+                "fe_dim_embed is for deterministic forecast engine, "
+                "diffusion has fe_diffusion_latent_dim"
+            )
+            assert not self.cf.get("forecast_residual", False), (
+                "fe_dim_embed adds skip in latent width itself, "
+                "forecast_residual would add it twice"
+            )
+            _inner_dim = fe_dim_embed
         #  Sets 2D rope for forecast engine only. If not set, rope_2D is used
         fe_rope = self.cf.get("fe_rope_2D", None)
         with_2d_rope = self.cf.get("rope_2D", False) if fe_rope is None else fe_rope
@@ -718,6 +732,19 @@ class ForecastingEngine(torch.nn.Module):
         for block in self.fe_blocks:
             block.apply(init_weights_final)
 
+        self.fe_proj_in, self.fe_proj_out = None, None
+        if self.with_proj:
+            dim_latent = self.cf.ae_global_dim_embed
+            # project latent down to fe_dim_embed (as I-JEPA predictor)
+            self.fe_proj_in = torch.nn.Linear(dim_latent, _inner_dim)
+            # project back to latent size (ae_global_dim_embed). Small init thus forecast engine
+            # starts close to no change as full width one
+            self.fe_proj_out = torch.nn.Sequential(
+                torch.nn.LayerNorm(_inner_dim, elementwise_affine=False),
+                torch.nn.Linear(_inner_dim, dim_latent),
+            )
+            self.fe_proj_out.apply(init_weights_final)
+
         # For concatenate_hiddendim: project 2D -> D after the full forward pass
         self.out_proj = (
             torch.nn.Linear(_inner_dim, _diffusion_latent_dim, bias=False) if _concat_hd else None
@@ -809,11 +836,18 @@ class ForecastingEngine(torch.nn.Module):
                         )
                         tokens = checkpoint(block, tokens, coords, noise_emb, use_reentrant=False)
         else:
+            if self.with_proj:
+                # keep latent for skip connection
+                tokens_latent = tokens
+                tokens = self.fe_proj_in(tokens)
             for block in self.fe_blocks:
                 if isinstance(block, torch.nn.LayerNorm):
                     tokens = block(tokens)
                 else:
                     tokens = checkpoint(block, tokens, coords, conditioning, use_reentrant=False)
+            if self.with_proj:
+                # skip connection thus blocks predict change of latent
+                tokens = tokens_latent + checkpoint(self.fe_proj_out, tokens, use_reentrant=False)
 
         if self.out_proj is not None:
             # tokens = self.out_proj(tokens)  # (B, H, 2D) -> (B, H, D)

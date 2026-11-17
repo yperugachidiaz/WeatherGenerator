@@ -739,6 +739,10 @@ class Model(torch.nn.Module):
             if self.cf.get("fe_diffusion_model", False)
             else self.forecast_engine.fe_blocks
         )
+        # projections in and out of forecast engine when fe_dim_embed is smaller than latent
+        for name in ("fe_proj_in", "fe_proj_out"):
+            proj = getattr(self.forecast_engine, name, None)
+            num_params_fe += get_num_parameters(proj) if proj is not None else 0
 
         mdict = self.embed_target_coords
         num_params_embed_tcs = [
