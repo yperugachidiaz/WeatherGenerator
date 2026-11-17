@@ -1224,7 +1224,7 @@ class Trainer(TrainerBase):
             for p in group["params"]
         }
 
-        loaded = 0
+        loaded, skipped = 0, []
         for name, param in self.model.named_parameters():
             if name not in named_state:
                 continue
@@ -1232,6 +1232,11 @@ class Trainer(TrainerBase):
             if optimizer is None:
                 continue
             entry = named_state[name]
+            # When changing optimizer (e.g. adamw to muon) when loading a checkpoint, params that
+            # move need to skip this and start with fresh optim state
+            if ("momentum_buffer" in entry) != isinstance(optimizer, torch.optim.Muon):
+                skipped.append(name)
+                continue
             new_entry = {}
             for key, val in entry.items():
                 if isinstance(val, torch.Tensor) and val.dim() > 0 and is_model_sharded:
@@ -1246,6 +1251,11 @@ class Trainer(TrainerBase):
         if is_root():
             total = sum(1 for _ in self.model.parameters())
             logger.info(f"Loaded optimizer state for {loaded}/{total} parameters.")
+            if skipped:
+                logger.warning(
+                    f"Skipped optimizer state of {len(skipped)} parameters saved by other "
+                    f"optimizer type, these start fresh: {', '.join(skipped)}"
+                )
 
     def _log(self, stage: Stage, stage_suffix: str = ""):
         """

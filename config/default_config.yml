@@ -207,6 +207,18 @@ training_config:
       beta1 : 0.975
       beta2 : 0.9875
       eps : 2e-08
+    # Muon puts 2D params in muon and rest in adamw as above
+    # muon :
+    #   lr_max : 5e-5
+    #   adjust_lr_fn : match_rms_adamw
+    #   # input embeddings and output heads to adamw instead of muon
+    #   adamw_embed_head : False
+    #   # regex list on param names, matching 2D params go to adamw instead of muon
+    #   adamw_param_patterns : []
+    #   # lr_max of params moved to adamw by the two keys above, null = adamw lr_max
+    #   adamw_moved_lr_max : null
+    #   # orthogonalize each matrix of fused swiglu / adaln weights on its own
+    #   split_fused : False
 
   losses : {
     "physical": {
