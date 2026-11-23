@@ -1158,30 +1158,12 @@ class Model(torch.nn.Module):
 
         # remove register  and class tokens
         tokens = tokens[:, self.num_aux_tokens :]
-
-        # get 1-ring neighborhood for prediction
-        # Derive the effective batch size from the token tensor so that the ensemble branch
-        # can pass all N members stacked on dim 0 without a separate loop.
         batch_size = tokens.shape[0]
-        s = [batch_size, self.num_healpix_cells, self.cf.ae_local_num_queries, tokens.shape[-1]]
-        # Add per-member batch offsets so that member i looks up its own rows in the
-        # flattened (batch_size * H, Q, D) tensor.  Without the offset every member
-        # would index into [0, H) — i.e. always member 0's tokens — causing all
-        # ensemble members to decode with identical features and produce identical
-        # predictions.
-        batch_offsets = (
-            torch.arange(batch_size, device=model_params.hp_nbours.device)[:, None, None]
-            * self.num_healpix_cells
-        )
-        idxs = (
-            model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)) + batch_offsets
-        ).flatten(0, 1)
-        tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
-        # TODO: precompute in model_params?
-        tokens_nbors_lens = torch.full(
-            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
-        )
-        tokens_nbors_lens[0] = 0
+
+        # one checkpoint per forecast step, only tokens and coords kept until backward. Needed for 8 steps
+        ckpt_step = self.cf.get("decoder_checkpoint_step", False)
+        if not ckpt_step:
+            tokens_nbors, tokens_nbors_lens = self._tokens_nbors(model_params, tokens)
 
         # pair with tokens from assimilation engine to obtain target tokens
         for stream_name in self.streams.keys():
@@ -1204,54 +1186,117 @@ class Model(torch.nn.Module):
             if len(t_coords) == 0:
                 continue
 
-            # embed token coords
-            tc_embed = self.embed_target_coords[stream_name]
-            tc_tokens = checkpoint(tc_embed, t_coords, use_reentrant=False)
+            # lens for varlen attention (replicate coords for ensemble members)
+            tcls = torch.cat(
+                [
+                    batch.samples[i_b % n_real].streams_data[stream_name].target_coords_lens[fstep_idx]
+                    for i_b in range(batch_size)
+                ]
+            )
+            tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
 
-            # skip when coordinate embeddings yields nan (i.e. the coord embedding network diverged)
-            if torch.isnan(tc_tokens).any():
-                logger.warning(
-                    (
-                        f"Skipping prediction for {stream_name} because",
-                        f" of {torch.isnan(tc_tokens).sum()} NaN in tc_tokens.",
-                    )
+            if ckpt_step:
+                pred = checkpoint(
+                    self._decode_stream,
+                    model_params,
+                    stream_name,
+                    tokens,
+                    None,
+                    None,
+                    t_coords,
+                    tcs_lens,
+                    use_reentrant=False,
                 )
-                pred = torch.tensor([], device=tc_tokens.device)
-
-            # skip empty lengths
-            elif tc_tokens.shape[0] == 0:
-                pred = torch.tensor([], device=tc_tokens.device)
-
             else:
-                # lens for varlen attention (replicate coords for ensemble members)
-                tcls = torch.cat(
-                    [
-                        batch.samples[i_b % n_real].streams_data[stream_name].target_coords_lens[fstep_idx]
-                        for i_b in range(batch_size)
-                    ]
+                pred = self._decode_stream(
+                    model_params,
+                    stream_name,
+                    tokens,
+                    tokens_nbors,
+                    tokens_nbors_lens,
+                    t_coords,
+                    tcs_lens,
                 )
-                tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
-
-                if self.cf.decoder_type == "Linear":
-                    pred = self.target_token_engines[stream_name](
-                        tc_tokens,
-                        tokens.reshape(-1, s[-1]),  # collapse the batch and token dimensions
-                        tcs_lens,
-                    ).unsqueeze(0)  # add ensemble dim: shape is then [1, preds_per_coord, channels]
-                else:
-                    tc_tokens = self.target_token_engines[stream_name](
-                        latent=tokens_nbors,
-                        output=tc_tokens,
-                        latent_lens=tokens_nbors_lens,
-                        output_lens=tcs_lens,
-                        coordinates=t_coords,
-                    )
-
-                    # final prediction head to map back to physical space
-                    pred = self.pred_heads[stream_name](tc_tokens)
 
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)
             output.add_physical_prediction(chunk_idx, stream_name, pred)
 
         return output
+
+    def _tokens_nbors(self, model_params: ModelParams, tokens: torch.Tensor):
+        """1-ring neighborhood tokens of each healpix cell (9 per cell) and their varlen lens"""
+        # Derive the effective batch size from the token tensor so that the ensemble branch
+        # can pass all N members stacked on dim 0 without a separate loop.
+        batch_size = tokens.shape[0]
+        s = [batch_size, self.num_healpix_cells, self.cf.ae_local_num_queries, tokens.shape[-1]]
+        # Add per-member batch offsets so that member i looks up its own rows in the
+        # flattened (batch_size * H, Q, D) tensor.  Without the offset every member
+        # would index into [0, H) — i.e. always member 0's tokens — causing all
+        # ensemble members to decode with identical features and produce identical
+        # predictions.
+        batch_offsets = (
+            torch.arange(batch_size, device=model_params.hp_nbours.device)[:, None, None]
+            * self.num_healpix_cells
+        )
+        idxs = (
+            model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)) + batch_offsets
+        ).flatten(0, 1)
+        tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
+        # TODO: precompute in model_params?
+        tokens_nbors_lens = torch.full(
+            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
+        )
+        tokens_nbors_lens[0] = 0
+        return tokens_nbors, tokens_nbors_lens
+
+    def _decode_stream(
+        self,
+        model_params: ModelParams,
+        stream_name: str,
+        tokens: torch.Tensor,
+        tokens_nbors: torch.Tensor | None,
+        tokens_nbors_lens: torch.Tensor | None,
+        t_coords: torch.Tensor,
+        tcs_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        """decoder of one stream: target coord embedding, target token engine and prediction head"""
+        # with decoder_checkpoint_step neighbors are computed here
+        if tokens_nbors is None:
+            tokens_nbors, tokens_nbors_lens = self._tokens_nbors(model_params, tokens)
+
+        # embed token coords
+        tc_embed = self.embed_target_coords[stream_name]
+        tc_tokens = checkpoint(tc_embed, t_coords, use_reentrant=False)
+
+        # skip when coordinate embeddings yields nan (i.e. the coord embedding network diverged)
+        if torch.isnan(tc_tokens).any():
+            logger.warning(
+                (
+                    f"Skipping prediction for {stream_name} because",
+                    f" of {torch.isnan(tc_tokens).sum()} NaN in tc_tokens.",
+                )
+            )
+            return torch.tensor([], device=tc_tokens.device)
+
+        # skip empty lengths
+        if tc_tokens.shape[0] == 0:
+            return torch.tensor([], device=tc_tokens.device)
+
+        if self.cf.decoder_type == "Linear":
+            return self.target_token_engines[stream_name](
+                tc_tokens,
+                tokens.reshape(-1, tokens.shape[-1]),  # collapse the batch and token dimensions
+                tcs_lens,
+            ).unsqueeze(0)  # add ensemble dim: shape is then [1, preds_per_coord, channels]
+
+        tc_tokens = self.target_token_engines[stream_name](
+            latent=tokens_nbors,
+            output=tc_tokens,
+            latent_lens=tokens_nbors_lens,
+            output_lens=tcs_lens,
+            coordinates=t_coords,
+        )
+
+        # final prediction head to map back to physical space
+        return self.pred_heads[stream_name](tc_tokens)
