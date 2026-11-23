@@ -94,6 +94,8 @@ pe_global_latlon: False
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
+# torch.compile of decoder blocks, same weights and checkpoints. About 20-28% faster AE training
+compile_decoder: False
 with_fsdp: True
 attention_dtype: bf16
 mixed_precision_dtype: bf16

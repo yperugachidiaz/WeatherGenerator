@@ -30,7 +30,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
-from weathergen.model.utils import ActivationFactory
+from weathergen.model.utils import ActivationFactory, compile_block
 from weathergen.utils.utils import get_dtype
 
 
@@ -1000,6 +1000,11 @@ class TargetPredictionEngineClassic(nn.Module):
                 )
             )
 
+        # fuse norms and elementwise ops of each block, dynamic since target counts vary
+        if cf.get("compile_decoder", False):
+            for block in self.tte:
+                compile_block(block)
+
     def forward(self, latent, output, latent_lens, output_lens, coordinates):
         tc_tokens = output
         tcs_lens = output_lens
@@ -1007,9 +1012,30 @@ class TargetPredictionEngineClassic(nn.Module):
         tokens_lens = latent_lens
         tcs_aux = coordinates
 
+        # max lens for flash attention once per call (one host sync instead of one per block)
+        max_q, max_kv = torch.stack([tcs_lens.max(), tokens_lens.max()]).tolist()
+
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = checkpoint(
+                    block,
+                    tc_tokens,
+                    tcs_lens,
+                    tcs_aux,
+                    max_lens=(max_q, max_q),
+                    use_reentrant=False,
+                )
+            elif isinstance(block, MultiCrossAttentionHeadVarlen):
+                tc_tokens = checkpoint(
+                    block,
+                    tc_tokens,
+                    tokens_stream,
+                    tcs_lens,
+                    tokens_lens,
+                    tcs_aux,
+                    max_lens=(max_q, max_kv),
+                    use_reentrant=False,
+                )
             else:
                 tc_tokens = checkpoint(
                     block,
