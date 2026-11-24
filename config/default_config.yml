@@ -62,6 +62,7 @@ fe_with_qk_lnorm: True
 fe_diffusion_model: False
 fe_layer_norm_after_blocks: []  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
 fe_impute_latent_noise_std: 0.0  # 1e-4
+fe_mlp_hidden_factor: 2  # dense MLP hidden size = factor * dim
 fe_mlp_type: "mlp"  # "mlp" (dense) or "moe" (mixture of experts)
 fe_moe_num_experts: 8
 fe_moe_top_k: 2  # experts per token

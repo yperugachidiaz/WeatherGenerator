@@ -726,6 +726,7 @@ class ForecastingEngine(torch.nn.Module):
             dim,
             dim,
             num_layers=2,
+            hidden_factor=self.cf.get("fe_mlp_hidden_factor", 2),
             mlp_type=self.cf.get("mlp_type", "mlp"),
             is_dit=self.cf.get("fe_diffusion_model", False),
             dit_is_cond=self.cf.get("fe_diffusion_model_conditioning_type", None) == "ada_ln",

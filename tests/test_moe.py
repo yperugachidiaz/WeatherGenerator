@@ -205,6 +205,15 @@ def test_forecasting_engine_forward_on_gpu(mlp_type):
     assert y.shape == x.shape and torch.isfinite(y).all()
 
 
+def test_forecasting_engine_dense_hidden_factor():
+    cf = _forecasting_cfg(fe_mlp_hidden_factor=8)
+    mode_cfg = OmegaConf.create({"forecast": {"policy": "fixed"}})
+    engine = ForecastingEngine(cf, mode_cfg, num_healpix_cells=12)
+
+    mlps = [b for b in engine.fe_blocks if isinstance(b, MLP)]
+    assert all(m.layers[1].out_features == 8 * DIM for m in mlps)
+
+
 def test_forecasting_engine_rejects_unknown_mlp_type():
     cf = _forecasting_cfg(fe_mlp_type="dense")
     mode_cfg = OmegaConf.create({"forecast": {"policy": "fixed"}})
