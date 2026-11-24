@@ -40,6 +40,7 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
 )
 from weathergen.model.layers import MLP, NamedLinear
+from weathergen.model.moe import MoEMLP
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_reconstructed
@@ -668,7 +669,7 @@ class Model(torch.nn.Module):
 
     def reset_parameters(self):
         def _reset_params(module):
-            if isinstance(module, nn.Linear | nn.LayerNorm):
+            if isinstance(module, nn.Linear | nn.LayerNorm | MoEMLP):
                 module.reset_parameters()
             else:
                 pass

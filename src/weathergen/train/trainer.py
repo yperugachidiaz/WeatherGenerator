@@ -31,6 +31,7 @@ from weathergen.model.ema import EMAModel
 from weathergen.model.model_interface import (
     init_model_and_shard,
 )
+from weathergen.model.moe import update_moe_routing_biases
 from weathergen.model.utils import apply_fct_to_blocks, set_to_eval
 from weathergen.train.collapse_monitor import CollapseMonitor
 from weathergen.train.loss_calculator import LossCalculator
@@ -620,6 +621,9 @@ class Trainer(TrainerBase):
             for lr_scheduler in self.lr_schedulers:
                 lr_scheduler.step()
 
+            # update MoE routing biases so the experts stay evenly used
+            moe_load = update_moe_routing_biases(self.model, cf.get("moe_bias_update_rate", 1.0e-3))
+
             batch_size_total = self.get_batch_size_total(self.batch_size_per_gpu)
             step = batch_size_total * self.cf.general.istep
 
@@ -656,6 +660,13 @@ class Trainer(TrainerBase):
             self._log_terminal(bidx, mini_epoch, TRAIN)
             if bidx % self.train_logging.metrics == 0:
                 self._log(TRAIN)
+                # Log MoE expert load
+                if moe_load and is_root():
+                    self.train_logger.log_metrics(
+                        TRAIN,
+                        {k: v.item() for k, v in moe_load.items()},
+                        step=self.cf.general.istep,
+                    )
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)
