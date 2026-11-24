@@ -213,6 +213,14 @@ training_config:
     grad_clip: 1.0
     weight_decay: 0.1
     log_grad_norms: False
+    # skip optimizer step if grad norm > factor x median of last window steps. No skips during lr
+    # warmup and first warmup_steps of each job
+    spike_guard:
+      enabled: False
+      factor: 10.0
+      window: 200
+      warmup_steps: 100
+      max_consecutive: 20
     adamw :
       # parameters are scaled by number of DDP workers
       beta1 : 0.975

@@ -37,6 +37,7 @@ from weathergen.train.collapse_monitor import CollapseMonitor
 from weathergen.train.loss_calculator import LossCalculator
 from weathergen.train.lr_scheduler import LearningRateScheduler
 from weathergen.train.optimizer import build_optimizer
+from weathergen.train.spike_guard import SpikeGuard
 from weathergen.train.target_and_aux_latent_rollout import LatentRolloutTargets
 from weathergen.train.target_and_aux_ssl_teacher import EMATeacher
 from weathergen.train.target_and_aux_utils import get_target_aux_calculator
@@ -143,6 +144,7 @@ class Trainer(TrainerBase):
         self.loss_spike_cfg = None
         self.loss_spike_file = None
         self.loss_spike_history = deque()
+        self.spike_guard = SpikeGuard()
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -569,6 +571,12 @@ class Trainer(TrainerBase):
             )
             for optimizer, lr_cfg in zip(self.optimizers, lr_cfgs, strict=True)
         ]
+        # no spike guard skips during lr warmup since grad norm rises normally there. Length taken
+        # from schedulers since they may change num_steps_warmup
+        self.spike_guard = SpikeGuard(
+            self.training_cfg.optimizer.get("spike_guard", None),
+            lr_warmup_steps=max(s.n_steps_warmup for s in self.lr_schedulers),
+        )
 
         # Restore optimizer momentum buffers when continuing from a checkpoint
         if run_id_contd is not None and self.cf.general.istep != 0:
@@ -769,12 +777,10 @@ class Trainer(TrainerBase):
                 if bidx % self.train_logging.metrics == 0:
                     self._log_instant_grad_norms(TRAIN)
 
-            # optimizer step
-            for optimizer in self.optimizers:
-                self.grad_scaler.step(optimizer)
-            self.grad_scaler.update()
+            # optimizer step, skipped for all optimizers when spike guard fires
+            self._optimizer_step(total_norm, mini_epoch, bidx)
 
-            # update learning rate
+            # update learning rate, also after skipped step thus lr stays tied to istep
             for lr_scheduler in self.lr_schedulers:
                 lr_scheduler.step()
 
@@ -1294,11 +1300,48 @@ class Trainer(TrainerBase):
                     stddev_all,
                     avg_loss=avg_loss,
                     lr=self.lr_schedulers[0].get_lr(),
+                    extra=self.spike_guard.metrics() if self.spike_guard.enabled else None,
                 )
 
         loss_calculator.loss_hist = []
         loss_calculator.losses_unweighted_hist = []
         loss_calculator.stddev_unweighted_hist = []
+
+    def _optimizer_step(self, total_norm, mini_epoch: int, bidx: int) -> bool:
+        """
+        Step all optimizers unless spike guard fires. Returns True if step was skipped.
+        total_norm is pre-clip norm of DDP all-reduced grads thus same value on all ranks.
+        """
+        skip = False
+        if self.spike_guard.enabled:
+            grad_norm = self._get_tensor_item(total_norm)
+            # all-reduce decision thus ranks can not split if norm differs slightly between ranks
+            skip = self._sync_loss_spike_skip(
+                self.spike_guard.should_skip(grad_norm, self.cf.general.istep)
+            )
+            self.spike_guard.record(grad_norm, skip)
+            if skip and is_root():
+                logger.warning(
+                    "Spike guard skipped step %s (mini_epoch %s, batch %s): grad norm %.4E, "
+                    "median %.4E, skipped so far %s",
+                    self.cf.general.istep,
+                    mini_epoch,
+                    bidx,
+                    grad_norm,
+                    self.spike_guard.median(),
+                    self.spike_guard.num_skipped,
+                )
+
+        if skip:
+            # no step thus Muon momentum and AdamW moments do not take spike in
+            for optimizer in self.optimizers:
+                optimizer.zero_grad()
+        else:
+            for optimizer in self.optimizers:
+                self.grad_scaler.step(optimizer)
+        # update() also after skip since unscale_() was called, on non-finite grads scale backs off
+        self.grad_scaler.update()
+        return skip
 
     def _get_tensor_item(self, tensor):
         """

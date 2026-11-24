@@ -101,9 +101,10 @@ class TrainLogger:
         stddev_all: dict,
         avg_loss: list[float] = None,
         lr: float = None,
+        extra: dict[str, float] | None = None,
     ) -> None:
         """
-        Log training or validation data
+        Log training or validation data, extra = additional scalars for same row
         """
         metrics: dict[str, float] = dict(num_samples=samples)
 
@@ -120,6 +121,9 @@ class TrainLogger:
         for key, value in stddev_all.items():
             val = np.nan if np.isnan(value).all() else np.nanmean(value)
             metrics[key] = val
+
+        if extra:
+            metrics.update(extra)
 
         self.log_metrics(stage, metrics)
 
