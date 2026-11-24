@@ -27,6 +27,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from weathergen.model.norms import AdaLayerNorm, AdaLNZero, RMSNorm, SwiGLU
 
@@ -86,6 +87,10 @@ class MLP(torch.nn.Module):
         if self.mlp_type == "swiglu":
             # Align with the standard LLaMA-style SwiGLU hidden-width rule.
             dim_hidden = max(1, int(2 * dim_hidden / 3))
+
+        # mlp_pad_hidden is set after model creation: zero pad swiglu hidden to x64 in forward
+        self.pad_hidden = False
+        self.hidden_pad = (-dim_hidden) % 64
 
         self.layers = torch.nn.ModuleList()
 
@@ -156,11 +161,20 @@ class MLP(torch.nn.Module):
             x, noise_gate = self.noise_conditioning(x, noise_emb)
             gate = cond_gate * noise_gate
 
-        for layer in self.layers:
-            if isinstance(layer, AdaLayerNorm):
-                x = layer(x, ada_ln_aux)
-            else:
-                x = layer(x)
+        if (
+            self.pad_hidden
+            and self.hidden_pad > 0
+            and self.mlp_type == "swiglu"
+            and not self.is_dit
+            and len(self.layers) == 5
+        ):
+            x = self._forward_swiglu_padded(x, ada_ln_aux if self.with_aux else None)
+        else:
+            for layer in self.layers:
+                if isinstance(layer, AdaLayerNorm):
+                    x = layer(x, ada_ln_aux)
+                else:
+                    x = layer(x)
 
         if self.with_residual:
             if self.is_dit:
@@ -172,6 +186,20 @@ class MLP(torch.nn.Module):
                 x = x + x_in.repeat([*[1 for _ in x.shape[:-1]], x.shape[-1] // x_in.shape[-1]])
 
         return x
+
+    def _forward_swiglu_padded(self, x, ada_ln_aux):
+        """swiglu mlp with hidden width padded with zeros to a multiple of 64. Odd widths (e.g. 2730)
+        run slow GPU kernels, multiples of 64 run fast ones. Padded units are silu(0) * 0 = 0 and
+        fc2 gets zero columns for them thus output is the same. Padding is done in forward only, weights
+        are unchanged thus same checkpoints"""
+        norm, fc1, act, drop, fc2 = self.layers
+        x = norm(x, ada_ln_aux) if isinstance(norm, AdaLayerNorm) else norm(x)
+        h, p = fc2.in_features, self.hidden_pad
+        # pad each half of fc1 (value and gate) thus chunk in swiglu still splits them right
+        w1 = F.pad(fc1.weight.unflatten(0, (2, h)), (0, 0, 0, p)).flatten(0, 1)
+        b1 = None if fc1.bias is None else F.pad(fc1.bias.unflatten(0, (2, h)), (0, p)).flatten()
+        x = drop(act(F.linear(x, w1, b1)))
+        return F.linear(x, F.pad(fc2.weight, (0, p)), fc2.bias)
 
 
 # NOTE: Inspired by GenCast/DiT.

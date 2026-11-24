@@ -98,6 +98,10 @@ compile_model: False
 compile_decoder: False
 # one checkpoint per forecast step for decoder, needed for 8 steps with all targets. Costs one extra decoder forward
 decoder_checkpoint_step: False
+# zero pad swiglu hidden width to a multiple of 64 in forward for faster GPU kernels
+mlp_pad_hidden: False
+# cudnn attention (torch sdpa) instead of flash attention in encoder global, aggregation and forecast engine
+attention_cudnn: False
 with_fsdp: True
 attention_dtype: bf16
 mixed_precision_dtype: bf16

@@ -11,6 +11,7 @@ from functools import partial
 
 import torch
 from flash_attn import flash_attn_func, flash_attn_varlen_func
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from weathergen.model.layers import LinearNormConditioning
@@ -23,6 +24,25 @@ Attention blocks used by WeatherGenerator.
 Some blocks optionally apply 2D RoPE. When enabled, the caller must provide per-token 2D
 coordinates aligned with the token order (lat, lon in radians).
 """
+
+
+def _attention_cudnn(qs, ks, vs):
+    """qs, ks, vs (batch, seq, heads, dim) as flash_attn_func, same math (scale dim**-0.5, no softcap,
+    no dropout). cuDNN backend of torch sdpa, torch flash backend if cuDNN can not run the call"""
+    q, k, v = (t.transpose(1, 2) for t in (qs, ks, vs.to(qs.dtype)))
+    with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION], set_priority=True):
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    return out.transpose(1, 2)
+
+
+def _use_cudnn(module, qs, dropout_rate):
+    """option attention_cudnn set on this module and call supported (no softcap, no dropout, 16 bit)"""
+    return (
+        module.attention_cudnn
+        and module.softcap == 0.0
+        and dropout_rate == 0.0
+        and qs.dtype in (torch.bfloat16, torch.float16)
+    )
 
 
 def _apply_xsa(attn_out: torch.Tensor, self_values: torch.Tensor) -> torch.Tensor:
@@ -99,6 +119,8 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
 
         self.dtype = attention_dtype
+        # attention_cudnn is set after model creation, used only when x_lens holds one sequence
+        self.attention_cudnn = False
 
         assert with_flash, "Only flash attention supported at the moment"
 
@@ -123,20 +145,25 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         # set dropout rate according to training/eval mode as required by flash_attn
         dropout_rate = self.dropout_rate if self.training else 0.0
 
-        cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
-        max_q, max_kv = max_lens if max_lens is not None else (x_lens.max(), x_lens.max())
-        # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs = flash_attn_varlen_func(
-            qs,
-            ks,
-            vs,
-            cum_x_lens,
-            cum_x_lens,
-            max_q,
-            max_kv,
-            softcap=self.softcap,
-            dropout_p=dropout_rate,
-        )
+        if x_lens.shape[0] == 2 and _use_cudnn(self, qs, dropout_rate):
+            # x_lens has a leading 0 thus one sequence over all rows (aggregation engine with batch 1
+            # and one input step): dense attention is the same
+            outs = _attention_cudnn(qs.unsqueeze(0), ks.unsqueeze(0), vs.unsqueeze(0)).squeeze(0)
+        else:
+            cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
+            max_q, max_kv = max_lens if max_lens is not None else (x_lens.max(), x_lens.max())
+            # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
+            outs = flash_attn_varlen_func(
+                qs,
+                ks,
+                vs,
+                cum_x_lens,
+                cum_x_lens,
+                max_q,
+                max_kv,
+                softcap=self.softcap,
+                dropout_p=dropout_rate,
+            )
 
         if self.use_xsa:
             outs = _apply_xsa(outs, vs)
@@ -673,6 +700,8 @@ class MultiSelfAttentionHead(torch.nn.Module):
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
 
         self.dtype = attention_dtype
+        # attention_cudnn is set after model creation
+        self.attention_cudnn = False
         if with_flash:
             self.att = torch.nn.functional.scaled_dot_product_attention
         else:
@@ -710,8 +739,11 @@ class MultiSelfAttentionHead(torch.nn.Module):
         # set dropout rate according to training/eval mode as required by flash_attn
         dropout_rate = self.dropout_rate if self.training else 0.0
 
-        # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
+        if _use_cudnn(self, qs, dropout_rate):
+            outs = _attention_cudnn(qs, ks, vs)
+        else:
+            # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
+            outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
 
         if self.use_xsa:
             outs = _apply_xsa(outs, vs)

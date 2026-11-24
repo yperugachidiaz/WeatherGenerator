@@ -559,6 +559,33 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
     targets_coords_size = dataset.get_targets_coords_size()
 
     cf_with_overrides = merge_configs(cf, overrides)
-    return Model(
+    model = Model(
         cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
     ).create()
+    set_speed_options(
+        model,
+        mlp_pad_hidden=cf_with_overrides.get("mlp_pad_hidden", False),
+        attention_cudnn=cf_with_overrides.get("attention_cudnn", False),
+    )
+    return model
+
+
+def set_speed_options(model, mlp_pad_hidden=False, attention_cudnn=False):
+    """run time options that keep parameters and checkpoints, results equal up to bf16 rounding.
+    Set before the first forward, else compiled decoder blocks recompile"""
+    for module in model.modules():
+        if isinstance(module, MLP):
+            module.pad_hidden = mlp_pad_hidden
+    # cudnn only for long dense sequences: encoder global + aggregation and forecast engine
+    encoder = getattr(model, "encoder", None)
+    engines = [
+        getattr(encoder, "ae_global_engine", None),
+        getattr(encoder, "ae_aggregation_engine", None),
+        getattr(model, "forecast_engine", None),
+    ]
+    for engine in engines:
+        if engine is None:
+            continue
+        for module in engine.modules():
+            if isinstance(module, MultiSelfAttentionHead | MultiSelfAttentionHeadVarlen):
+                module.attention_cudnn = attention_cudnn
