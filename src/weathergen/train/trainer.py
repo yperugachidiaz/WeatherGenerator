@@ -75,6 +75,25 @@ LOSS_SPIKE_DETECTION_DEFAULTS = {
 # cfg_keys_to_filter = ["losses", "model_input", "target_input"]
 
 
+def loader_kwargs(data_loading_cfg, num_workers: int) -> dict:
+    """
+    DataLoader arguments for train and validation.
+
+    prefetch_factor was in configs but never passed (torch default 2). It sets how many batches
+    each worker keeps in /dev/shm.
+    """
+    kwargs = {
+        "batch_size": None,
+        "batch_sampler": None,
+        "shuffle": False,
+        "num_workers": num_workers,
+    }
+    # torch does not allow prefetch_factor without workers
+    if num_workers > 0:
+        kwargs["prefetch_factor"] = data_loading_cfg.get("prefetch_factor", 2)
+    return kwargs
+
+
 def _expand_targets_to_match_preds(preds, targets_and_auxs: dict) -> None:
     """
     Replicate per-fstep entries in each TargetAuxOutput so its ``physical`` and ``latent``
@@ -471,16 +490,10 @@ class Trainer(TrainerBase):
         self.dataset = MultiStreamDataSampler(cf, self.training_cfg, stage=TRAIN)
         self.dataset_val = MultiStreamDataSampler(cf, self.validation_cfg, stage=VAL)
 
-        loader_params = {
-            "batch_size": None,
-            "batch_sampler": None,
-            "shuffle": False,
-            "num_workers": cf.data_loading.num_workers,
-        }
+        loader_params = loader_kwargs(cf.data_loading, cf.data_loading.num_workers)
         self.data_loader = torch.utils.data.DataLoader(self.dataset, **loader_params, sampler=None)
-        loader_params["num_workers"] = cf.data_loading.get(
-            "num_workers_validation", cf.data_loading.num_workers
-        )
+        num_workers_val = cf.data_loading.get("num_workers_validation", cf.data_loading.num_workers)
+        loader_params = loader_kwargs(cf.data_loading, num_workers_val)
         self.data_loader_validation = torch.utils.data.DataLoader(
             self.dataset_val, **loader_params, sampler=None
         )
@@ -674,7 +687,10 @@ class Trainer(TrainerBase):
 
         # training loop
         self.t_start = time.time()
-        for bidx, batch in enumerate(dataset_iter):
+        # no enumerate: it keeps last batch (/dev/shm) during the wait
+        bidx = -1
+        for batch in dataset_iter:
+            bidx += 1
             if cf.data_loading.get("memory_pinning", False):
                 # pin memory for faster CPU-GPU transfer
                 batch = batch.pin_memory()
@@ -830,6 +846,9 @@ class Trainer(TrainerBase):
 
             self.cf.general.istep += 1
 
+            # free batch (/dev/shm) before waiting for the next
+            del batch, preds, targets_and_auxs
+
         self.dataset.advance()
 
     def validate(self, mini_epoch, mode_cfg, batch_size):
@@ -879,7 +898,10 @@ class Trainer(TrainerBase):
                     total=len(self.data_loader_validation) * self.cf.world_size,
                     disable=self.cf.rank > 0,
                 ) as pbar:
-                    for bidx, batch in enumerate(dataset_val_iter):
+                    # no enumerate: it keeps last batch (/dev/shm) during the wait
+                    bidx = -1
+                    for batch in dataset_val_iter:
+                        bidx += 1
                         compute_full_loss = mode_cfg.get("compute_full_validation_loss", True)
                         if compute_full_loss or is_diffusion:
                             batch.to_device(
@@ -966,6 +988,9 @@ class Trainer(TrainerBase):
                             metadata=extract_batch_metadata(batch),
                         )
                         pbar.update(batch_size * self.cf.world_size)
+
+                        # free batch (/dev/shm) before waiting for the next
+                        del batch, preds, targets_and_auxs
 
                         if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
                             break

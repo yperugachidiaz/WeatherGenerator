@@ -1005,6 +1005,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     break
 
             yield batch
+            # else worker keeps sent batch in /dev/shm while loading the next
+            del batch
 
     def __len__(self):
         return self.len
