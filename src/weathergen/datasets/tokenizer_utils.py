@@ -1,3 +1,5 @@
+from itertools import chain, compress
+
 import numpy as np
 import pandas as pd
 import torch
@@ -119,10 +121,9 @@ def encode_times_target(times, time_win) -> torch.tensor:
 def hpy_cell_splits(coords: torch.tensor, hl: int):
     """Compute nest HEALPix cell ids and a packed point order for level ``hl``.
 
-    One ``np.lexsort((theta, cell_id))`` groups points by cell and orders them
-    by theta within each cell. That matches a stable sort by cell and then a
-    stable sort by theta per cell, because ``lexsort`` is stable and uses the
-    last key as the primary one.
+    Points grouped by cell and ordered by theta within each cell, as
+    ``np.lexsort((theta, cell_id))``. Done as stable sort by theta then stable
+    sort by cell: same order but faster (radix sort of cell ids).
 
     Returns
       idxs_ord : indices into thetas,phis,posr3, grouped by ascending healpix cell and
@@ -134,8 +135,14 @@ def hpy_cell_splits(coords: torch.tensor, hl: int):
     hpy_idxs = ang2pix(2**hl, thetas, phis, nest=True)
 
     thetas_np = thetas.numpy() if isinstance(thetas, torch.Tensor) else np.asarray(thetas)
-    idxs_ord = np.lexsort((thetas_np, hpy_idxs))
-    counts = np.bincount(hpy_idxs, minlength=12 * 4**hl)
+    num_cells = 12 * 4**hl
+    idxs_theta = np.argsort(thetas_np, kind="stable")
+    cells_sorted = hpy_idxs[idxs_theta]
+    # numpy uses a radix sort for stable sorts of 16 bit ints
+    if num_cells <= 2**16:
+        cells_sorted = cells_sorted.astype(np.uint16)
+    idxs_ord = idxs_theta[np.argsort(cells_sorted, kind="stable")]
+    counts = np.bincount(hpy_idxs, minlength=num_cells)
 
     return idxs_ord, counts
 
@@ -196,14 +203,12 @@ def hpy_splits(
         token_lens[last] = counts[filled] - (tokens_per_cell[filled] - 1) * token_size
         tokens = torch.split(torch.from_numpy(flat), token_lens.tolist())
 
+    # token lens from numpy instead of len() per token tensor
+    lens = [token_size] * len(tokens) if pad_tokens else token_lens.tolist()
     token_starts = (np.cumsum(tokens_per_cell) - tokens_per_cell).tolist()
-    idxs_ord = [
-        list(tokens[start : start + num]) if num > 0 else []
-        for start, num in zip(token_starts, tokens_per_cell.tolist(), strict=True)
-    ]
-
-    # extract length and flatten nested list
-    idxs_ord_lens = [[len(a) for a in aa] for aa in idxs_ord]
+    starts_nums = list(zip(token_starts, tokens_per_cell.tolist(), strict=True))
+    idxs_ord = [list(tokens[start : start + num]) for start, num in starts_nums]
+    idxs_ord_lens = [lens[start : start + num] for start, num in starts_nums]
 
     return idxs_ord, idxs_ord_lens
 
@@ -255,6 +260,42 @@ def tokenize_spacetime(
     return idxs_cells, idxs_cells_lens
 
 
+def _take_rows(x, idxs):
+    """x[idxs] along the first dim, index_select is much faster than advanced indexing"""
+    return torch.index_select(x, 0, idxs) if torch.is_tensor(x) else x[idxs]
+
+
+def _token_mask_info(idxs_cells, idxs_cells_lens, mask_tokens):
+    """Per token mask info, without python loops over tensors.
+
+    Returns
+      mask : bool per token
+      idxs_lens : length of each token
+      tokens_per_cell : number of kept tokens per cell (int64)
+      points_per_cell : number of kept points per cell (int64)
+      idxs_data : indices of all kept points (torch, concatenated) or None if nothing is kept
+    """
+    num_cells = len(idxs_cells_lens)
+    num_tokens_per_cell = np.fromiter(map(len, idxs_cells_lens), dtype=np.int64, count=num_cells)
+    num_tokens = int(num_tokens_per_cell.sum())
+    idxs_lens = np.fromiter(chain.from_iterable(idxs_cells_lens), dtype=np.int64, count=num_tokens)
+    mask = np.asarray(mask_tokens, dtype=bool)
+    assert mask.shape == (num_tokens,), "mask_tokens has to have one entry per token"
+
+    # tokens of a cell are contiguous thus per cell sums = cumsum differences
+    cell_ends = np.cumsum(num_tokens_per_cell)
+    cell_starts = cell_ends - num_tokens_per_cell
+    csum_tokens = np.concatenate(([0], np.cumsum(mask, dtype=np.int64)))
+    csum_points = np.concatenate(([0], np.cumsum(np.where(mask, idxs_lens, 0))))
+    tokens_per_cell = csum_tokens[cell_ends] - csum_tokens[cell_starts]
+    points_per_cell = csum_points[cell_ends] - csum_points[cell_starts]
+
+    idxs_data = list(compress(chain.from_iterable(idxs_cells), mask))
+    idxs_data = torch.cat(idxs_data) if len(idxs_data) > 0 else None
+
+    return mask, idxs_lens, tokens_per_cell, points_per_cell, idxs_data
+
+
 def tokenize_apply_mask_source(
     idxs_cells,
     idxs_cells_lens,
@@ -280,64 +321,68 @@ def tokenize_apply_mask_source(
         tokens_per_cell = torch.zeros(len(idxs_cells_lens), dtype=torch.int32)
         return tokens_cells, tokens_per_cell
 
-    # convert to token level, forgetting about cells
-    idxs_tokens = [i for t in idxs_cells for i in t]
-    idxs_lens = [i for t in idxs_cells_lens for i in t]
-
     # apply spatial masking on a per token level
     if mask_tokens is None:
         return return_empty(rdata, idxs_cells_lens)
 
     # filter tokens using mask to obtain flat per data point index list
-    idxs_data = [t for t, m in zip(idxs_tokens, mask_tokens, strict=True) if m]
+    mask, idxs_lens, tokens_per_cell, points_per_cell, idxs_data = _token_mask_info(
+        idxs_cells, idxs_cells_lens, mask_tokens
+    )
 
-    if len(idxs_data) == 0:
+    if idxs_data is None:
         return return_empty(rdata, idxs_cells_lens)
 
-    idxs_data = torch.cat(idxs_data)
     # filter list of token lens using mask and obtain flat list for splitting
-    idxs_data_lens = torch.tensor([t for t, m in zip(idxs_lens, mask_tokens, strict=True) if m])
+    idxs_data_lens = idxs_lens[mask]
 
     # pad with zero at the begining of the conceptual 2D data tensor:
     # idxs_cells -> idxs_tokens -> idxs_data has been prepared so
     # that the zero-index is used to add the padding to the tokens to ensure fixed size
-    times_enc = enc_time(rdata.datetimes, time_win)
-    zeros_like = torch.zeros_like
-    datetimes_enc_padded = torch.cat([zeros_like(times_enc[0]).unsqueeze(0), times_enc])
-    geoinfos_padded = torch.cat([zeros_like(rdata.geoinfos[0]).unsqueeze(0), rdata.geoinfos])
-    coords_padded = torch.cat([zeros_like(rdata.coords[0]).unsqueeze(0), rdata.coords])
-    data_padded = torch.cat([zeros_like(rdata.data[0]).unsqueeze(0), rdata.data])
+    def pad_row0(x):
+        return torch.cat([torch.zeros_like(x[:1]), x])
 
-    # apply mask
-    datetimes = datetimes_enc_padded[idxs_data]
-    geoinfos = geoinfos_padded[idxs_data]
-    coords = coords_padded[idxs_data]
-    data = data_padded[idxs_data]
+    times_enc = enc_time(rdata.datetimes, time_win)
+    coords_padded = pad_row0(rdata.coords)
 
     if mask_channels is not None:
         assert False, "to be implemented"
         # data = data_padded[ : channel_mask]
 
-    # local coords
-    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    tokens_per_cell = torch.tensor([t.sum() for t in mask_tokens_per_cell])
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
-    coords_local = get_source_coords_local(coords, hpy_verts_rots, masked_points_per_cell)
+    # local coords, padding rows computed once per cell
+    tokens_per_cell = torch.from_numpy(tokens_per_cell)
+    masked_points_per_cell = torch.from_numpy(points_per_cell.astype(np.int32))
+    coords_local = get_source_coords_local_padded(
+        coords_padded, idxs_data, hpy_verts_rots, masked_points_per_cell
+    )
 
-    # create tensor that contains all data
-    stream_ids = torch.full([len(datetimes), 1], stream_id, dtype=torch.float32)
-    tokens = torch.cat((stream_ids, datetimes, coords_local, geoinfos, data), 1)
+    # all data: stream_id | datetimes | coords_local | geoinfos | data
+    # columns joined per point first (row 0 = padding) then gathered once, coords_local set after
+    num_points = times_enc.shape[0]
+    stream_ids = torch.full([num_points + 1, 1], stream_id, dtype=torch.float32)
+    coords_local_zeros = torch.zeros([num_points + 1, coords_local.shape[1]], dtype=torch.float32)
+    per_point = torch.cat(
+        (
+            stream_ids,
+            pad_row0(times_enc),
+            coords_local_zeros,
+            pad_row0(rdata.geoinfos),
+            pad_row0(rdata.data),
+        ),
+        1,
+    )
+    tokens = torch.index_select(per_point, 0, idxs_data)
+    col_coords = 1 + times_enc.shape[1]
+    tokens[:, col_coords : col_coords + coords_local.shape[1]] = coords_local
 
     # split up tensor into tokens
     # TODO: idxs_data_lens is currently only defined when mask_tokens is not None
-    idxs_data_lens = idxs_data_lens.tolist()
-    tokens_cells = torch.split(tokens, idxs_data_lens)
+    if (idxs_data_lens == idxs_data_lens[0]).all():
+        # padded tokens all have same length thus one stacked view (no copy), indexing and len()
+        # work as for the list and StreamData.add_source skips torch.stack
+        tokens_cells = tokens.view(len(idxs_data_lens), int(idxs_data_lens[0]), tokens.shape[1])
+    else:
+        tokens_cells = torch.split(tokens, idxs_data_lens.tolist())
 
     return tokens_cells, tokens_per_cell
 
@@ -355,6 +400,7 @@ def tokenize_apply_mask_target(
     hpy_verts_local,
     hpy_nctrs,
     enc_time,
+    compute_coords_local=True,
 ):
     """
     Apply masking to the data.
@@ -363,6 +409,8 @@ def tokenize_apply_mask_target(
     the cols the channels. Thereby mask_tokens acts on the rows, grouped according to the tokens as
     specified in idxs_cells and mask_channels acts on the columns.
 
+    compute_coords_local=False skips target coords encoding (coords_local empty), for when only
+    target values are needed.
     """
 
     def return_empty(rdata, idxs_cells_lens):
@@ -373,44 +421,33 @@ def tokenize_apply_mask_target(
         # data, datetimes, coords, coords_local, masked_points_per_cell
         return do, dt, coords, coords, masked_points_per_cell
 
-    # convert to token level, forgetting about cells
-    idxs_tokens = [i for t in idxs_cells for i in t]
-    idxs_lens = [i for t in idxs_cells_lens for i in t]
-
     # apply spatial masking on a per token level
     if mask_tokens is None:
         return return_empty(rdata, idxs_cells_lens)
 
     # filter tokens using mask to obtain flat per data point index list
-    idxs_data = [t for t, m in zip(idxs_tokens, mask_tokens, strict=True) if m]
+    _, idxs_lens, _, points_per_cell, idxs_data = _token_mask_info(
+        idxs_cells, idxs_cells_lens, mask_tokens
+    )
 
-    if len(idxs_data) == 0:
+    if idxs_data is None:
         return return_empty(rdata, idxs_cells_lens)
-
-    idxs_data = torch.cat(idxs_data)
 
     # apply mask
     datetimes = np.atleast_1d(rdata.datetimes[idxs_data])
-    datetimes_enc = enc_time(datetimes, time_win)
-    geoinfos = rdata.geoinfos[idxs_data]
-    coords = rdata.coords[idxs_data]
-    data = rdata.data[idxs_data]
+    geoinfos = _take_rows(rdata.geoinfos, idxs_data)
+    coords = _take_rows(rdata.coords, idxs_data)
+    data = _take_rows(rdata.data, idxs_data)
 
     if mask_channels is not None:
         assert False, "to be implemented"
         # data = data_padded[ : channel_mask]
 
-    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
+    masked_points_per_cell = torch.from_numpy(points_per_cell.astype(np.int32))
 
     # compute encoding of target coordinates used in prediction network
-    if torch.tensor(idxs_lens).sum() > 0:
+    if compute_coords_local and idxs_lens.sum() > 0:
+        datetimes_enc = enc_time(datetimes, time_win)
         coords_local = get_target_coords_local(
             stream_id,
             hl,
@@ -451,6 +488,60 @@ def get_source_coords_local(
     # TODO: vec_scaled are small -> should they be normalized/rescaled?
 
     return vec_scaled
+
+
+def _source_coords_local_rows(coords: Tensor, rots: Tensor) -> Tensor:
+    """get_source_coords_local for given rows and per row rotations, without the row 0 reset"""
+    posr3 = s2tor3(*theta_phi_to_standard_coords(coords))
+    vec_rot = torch.bmm(rots, posr3.unsqueeze(-1)).squeeze(-1)
+    return r3tos2(vec_rot).to(torch.float32)
+
+
+def get_source_coords_local_padded(
+    coords_padded: Tensor,
+    idxs_data: Tensor,
+    hpy_verts_rots: Tensor,
+    masked_points_per_cell: Tensor,
+) -> Tensor:
+    """Same values as get_source_coords_local(coords_padded[idxs_data], ...).
+
+    A padding row (index 0) only depends on its cell thus it is computed once per cell, per point
+    work only for real points.
+    """
+    num_cells = hpy_verts_rots.shape[0]
+    cell_of_row = torch.repeat_interleave(
+        torch.arange(num_cells), masked_points_per_cell.to(torch.int64)
+    )
+
+    # row 0 is done on its own below
+    is_pad = idxs_data == 0
+    is_real = ~is_pad
+    is_pad[0] = is_real[0] = False
+    rows_real = torch.nonzero(is_real).squeeze(1)
+    rows_pad = torch.nonzero(is_pad).squeeze(1)
+
+    out = torch.empty((idxs_data.shape[0], 2), dtype=torch.float32)
+
+    # real points
+    coords = torch.index_select(coords_padded, 0, torch.index_select(idxs_data, 0, rows_real))
+    rots = torch.index_select(hpy_verts_rots, 0, torch.index_select(cell_of_row, 0, rows_real))
+    out[rows_real] = _source_coords_local_rows(coords, rots)
+
+    # padding rows: one value per cell
+    if rows_pad.numel() > 0:
+        pad_vals = _source_coords_local_rows(
+            coords_padded[0:1].expand(num_cells, -1), hpy_verts_rots
+        )
+        out[rows_pad] = torch.index_select(
+            pad_vals, 0, torch.index_select(cell_of_row, 0, rows_pad)
+        )
+
+    # row 0 with zero position vector as in get_source_coords_local
+    rot0 = hpy_verts_rots[cell_of_row[0]].unsqueeze(0)
+    posr3_0 = torch.zeros((1, 3, 1), dtype=coords_padded.dtype)
+    out[0] = r3tos2(torch.bmm(rot0, posr3_0).squeeze(-1)).to(torch.float32)[0]
+
+    return out
 
 
 def _rotate_points_per_cell(cell_rots, points, points_per_cell):

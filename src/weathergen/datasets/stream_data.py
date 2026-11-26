@@ -199,6 +199,7 @@ class StreamData:
         ss_lens : torch.Tensor( number of healpix cells )
         ss_cells : list( number of healpix cells )
             [ torch.Tensor( tokens per cell, token size, number of channels) ]
+            or one stacked tensor ( number of tokens, token size, number of channels )
 
         Returns
         -------
@@ -213,10 +214,14 @@ class StreamData:
 
         self.source_raw[step] = ss_raw
         self.source_tokens_lens[step] = ss_lens
-        self.source_tokens_cells[step] = torch.stack(ss_cells)
-
-        idx = torch.isnan(self.source_tokens_cells[step])
-        self.source_tokens_cells[step][idx] = self.mask_value
+        # padded tokens come already stacked
+        if not torch.is_tensor(ss_cells):
+            ss_cells = torch.stack(ss_cells)
+        # NaN to mask value in place, inf kept as before
+        inf = float("inf")
+        self.source_tokens_cells[step] = torch.nan_to_num_(
+            ss_cells, nan=self.mask_value, posinf=inf, neginf=-inf
+        )
 
         self.source_is_spoof[step] = is_spoof
 
